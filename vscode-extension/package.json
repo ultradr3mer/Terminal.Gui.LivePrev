@@ -3,7 +3,7 @@
   "displayName": "Terminal.Gui XAML Live Preview",
   "description": "Preview .tui.xaml files as real Terminal.Gui views, straight from the editor context menu.",
   "version": "0.1.0",
-  "publisher": "tool2team",
+  "publisher": "clara",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
@@ -145,13 +145,11 @@
           "type": "string",
           "enum": [
             "auto",
-            "app",
-            "cli"
+            "app"
           ],
           "enumDescriptions": [
             "Host the preview in the view's own app when that app references TuiPreview.Host, otherwise use the CLI.",
-            "Always host the preview in the view's own app; fail if it does not reference TuiPreview.Host.",
-            "Always use the preview CLI."
+            "Always host the preview in the view's own app; fail if it does not reference TuiPreview.Host."
           ],
           "default": "auto",
           "markdownDescription": "Where the preview runs. An app that references `TuiPreview.Host` and calls `TuiPreviewHost.TryRun(args, out int code)` first in `Main` hosts it itself: the extension builds the app, runs a copy of its output with `--tui-preview`, and the view compiles against exactly what the app runs with."
@@ -175,11 +173,6 @@
           "type": "boolean",
           "default": false,
           "description": "Emit ANSI colour escapes in rendered output (sets TUI_ANSI=1)."
-        },
-        "tuiLivePreview.live": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Preview unsaved editor changes, not just what is on disk. The live buffer is mirrored to a scratch file that the preview watches, so edits appear without saving. Turn this off to always preview the last saved version, which is what you want when a rendered frame needs to be reproducible (CI, screenshots, a bug report)."
         },
         "tuiLivePreview.live": {
           "type": "boolean",
