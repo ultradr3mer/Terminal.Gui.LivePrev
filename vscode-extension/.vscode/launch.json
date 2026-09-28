@@ -1,0 +1,37 @@
+{
+  // F5 / "Run Extension" launches a second VS Code window (the Extension Development Host)
+  // with this extension loaded, so you can right-click a real .tui.xaml in it.
+  //
+  // ${workspaceFolder} is the vscode-extension folder, so the host opens THAT as the
+  // workspace. The extension auto-detects the CLI by walking up from the workspace root,
+  // which means a Development Host opened here will not find ../cli. Open the REPO ROOT
+  // as the Extension Development Host workspace instead -- see the second config below.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension (opens vscode-extension folder)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/out/**/*.js"
+      ]
+    },
+    {
+      // This is the one to use: it opens the repo root, so the CLI is discoverable and
+      // tests\\MainWindow.tui.xaml is right there to right-click.
+      "name": "Run Extension (opens repo root as workspace)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}",
+        "${workspaceFolder}/.."
+      ],
+      "outFiles": [
+        "${workspaceFolder}/out/**/*.js"
+      ]
+    }
+  ]
+}

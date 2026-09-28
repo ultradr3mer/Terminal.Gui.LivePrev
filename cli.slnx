@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="cli/cli.csproj" />
+  <Project Path="host/TuiPreview.Host.csproj" />
+  <Project Path="samples/HostedApp/HostedApp.csproj" />
+</Solution>

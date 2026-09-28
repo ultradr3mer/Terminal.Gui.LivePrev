@@ -1,0 +1,57 @@
+<Project>
+
+  <!--
+    Records what a preview needs to compile a view the way this project does, but cannot read
+    from the running app: the <Using> items, Nullable, LangVersion and DefineConstants. They go
+    into AssemblyMetadata attributes that TuiPreviewHost.TryRun reads back at runtime.
+
+    Also grants the in-memory preview assembly (always named TuiPreview) access to this
+    project's internals.
+
+    Opt out with <TuiPreviewEmitMetadata>false</TuiPreviewEmitMetadata>.
+  -->
+
+  <PropertyGroup>
+    <TuiPreviewEmitMetadata Condition="'$(TuiPreviewEmitMetadata)' == ''">true</TuiPreviewEmitMetadata>
+  </PropertyGroup>
+
+  <Target Name="TuiPreviewWriteMetadata"
+          BeforeTargets="CoreCompile"
+          DependsOnTargets="PrepareForBuild"
+          Condition="'$(TuiPreviewEmitMetadata)' == 'true' and '$(Language)' == 'C#'">
+
+    <!-- Read here rather than at evaluation, after the SDK has filled them in. -->
+    <PropertyGroup>
+      <_TuiPreviewMetadataFile>$(IntermediateOutputPath)TuiPreview.Metadata.g.cs</_TuiPreviewMetadataFile>
+      <_TuiPreviewUsings>@(Using->'%(Identity)|%(Alias)|%(Static)', ';')</_TuiPreviewUsings>
+
+      <!-- Escaped, or each ';' would split a line below into several items. -->
+      <_TuiPreviewUsings>$([MSBuild]::Escape($(_TuiPreviewUsings)))</_TuiPreviewUsings>
+      <_TuiPreviewDefines>$([MSBuild]::Escape($(DefineConstants)))</_TuiPreviewDefines>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <_TuiPreviewLine Include="// &lt;auto-generated/&gt; Written by TuiPreview.Host.targets." />
+      <_TuiPreviewLine Include="[assembly: global::System.Reflection.AssemblyMetadataAttribute(&quot;TuiPreview.Usings&quot;, &quot;$(_TuiPreviewUsings)&quot;)]" />
+      <_TuiPreviewLine Include="[assembly: global::System.Reflection.AssemblyMetadataAttribute(&quot;TuiPreview.Nullable&quot;, &quot;$(Nullable)&quot;)]" />
+      <_TuiPreviewLine Include="[assembly: global::System.Reflection.AssemblyMetadataAttribute(&quot;TuiPreview.LangVersion&quot;, &quot;$(LangVersion)&quot;)]" />
+      <_TuiPreviewLine Include="[assembly: global::System.Reflection.AssemblyMetadataAttribute(&quot;TuiPreview.DefineConstants&quot;, &quot;$(_TuiPreviewDefines)&quot;)]" />
+
+      <!-- A strong-named assembly cannot grant access to an unsigned one (CS1726). -->
+      <_TuiPreviewLine Include="[assembly: global::System.Runtime.CompilerServices.InternalsVisibleTo(&quot;TuiPreview&quot;)]"
+                       Condition="'$(SignAssembly)' != 'true'" />
+    </ItemGroup>
+
+    <!-- WriteOnlyWhenDifferent keeps an unchanged file's timestamp, so CoreCompile stays incremental. -->
+    <WriteLinesToFile File="$(_TuiPreviewMetadataFile)"
+                      Lines="@(_TuiPreviewLine)"
+                      Overwrite="true"
+                      WriteOnlyWhenDifferent="true" />
+
+    <ItemGroup>
+      <Compile Include="$(_TuiPreviewMetadataFile)" />
+      <FileWrites Include="$(_TuiPreviewMetadataFile)" />
+    </ItemGroup>
+  </Target>
+
+</Project>
