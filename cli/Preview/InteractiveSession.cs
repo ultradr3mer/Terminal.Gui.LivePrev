@@ -1,11 +1,11 @@
 using Terminal.Gui.App;
 using Terminal.Gui.Drivers;
 
-namespace TuiPreview.Host.Preview;
+namespace TuiPreview.Cli.Preview;
 
 /// <summary>
 /// Runs the interactive preview: a Terminal.Gui application hosting a
-/// <see cref="PreviewBuilder"/>, rebuilt whenever the XAML changes on disk.
+/// <see cref="PreviewBuilder"/>, rebuilt whenever the view file changes on disk.
 /// </summary>
 internal static class InteractiveSession
 {

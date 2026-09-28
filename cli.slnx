@@ -1,4 +1,5 @@
 <Solution>
-  <Project Path="host/TuiPreview.Host.csproj" />
-  <Project Path="samples/HostedApp/HostedApp.csproj" />
+  <Project Path="cli/TuiPreview.Cli.csproj" />
+  <Project Path="controls/TuiControls/TuiControls.csproj" />
+  <Project Path="samples/SampleApp/SampleApp.csproj" />
 </Solution>

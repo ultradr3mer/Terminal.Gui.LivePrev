@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Builds the preview host, then tests, packages and installs the VS Code extension.
+    Builds the tuipreview tool, then tests, packages and installs the VS Code extension.
 
 .DESCRIPTION
-    The extension previews a view inside the app it belongs to: the app references
-    TuiPreview.Host and calls TuiPreviewHost.TryRun first in Main. The extension builds that
-    app itself, so nothing here has to be built for it to work. The host and the sample app
-    are built anyway, to catch a broken package before the extension is installed.
+    The extension runs the tuipreview tool on a .tui.cs view. The tool is published into
+    vscode-extension\tool and ships inside the VSIX, so the extension works anywhere with no
+    setup. Inside this repo a build in cli\bin takes precedence, so changes to the tool show up
+    in previews right away. The view's own app is never built.
 
     Installing a VSIX over an already-installed copy is an in-place update:
     `code --install-extension` installs or updates, so there is never a reason to uninstall
@@ -22,28 +22,29 @@
 .PARAMETER SkipTests
     Skip the extension test suite.
 
-.PARAMETER SkipHost
-    Skip building the host and the sample app.
+.PARAMETER SkipBuild
+    Skip building the solution and publishing the bundled tool. An existing
+    vscode-extension\tool is packaged as it is.
 
 .PARAMETER Pack
-    Also pack TuiPreview.Host into a local NuGet feed, so apps outside this repo can use
-    <PackageReference Include="TuiPreview.Host" />. See -Feed.
+    Also pack the tuipreview tool and TuiControls into a local NuGet feed. The tool installs
+    from there with `dotnet tool install -g TuiPreview.Cli --add-source <feed>`, and an app
+    uses the controls with <PackageReference Include="TuiControls" />. See -Feed.
 
 .PARAMETER Feed
-    Where -Pack puts the package. Defaults to .\nupkg. Add it as a package source with
-    `dotnet nuget add source <path> -n TuiPreviewLocal`.
+    Where -Pack puts the packages. Defaults to .\nupkg.
 
 .EXAMPLE
-    .\install-host-ext.ps1
+    .\install-ext.ps1
 
 .EXAMPLE
-    .\install-host-ext.ps1 -Pack -Feed C:\nuget-local
+    .\install-ext.ps1 -Pack -Feed C:\nuget-local
 #>
 [CmdletBinding()]
 param(
     [switch] $Dev,
     [switch] $SkipTests,
-    [switch] $SkipHost,
+    [switch] $SkipBuild,
     [switch] $Pack,
     [string] $Feed
 )
@@ -51,8 +52,13 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $extDir = Join-Path $root 'vscode-extension'
-$hostProj = Join-Path $root 'host\TuiPreview.Host.csproj'
-$sampleProj = Join-Path $root 'samples\HostedApp\HostedApp.csproj'
+$solution = Join-Path $root 'cli.slnx'
+$cliProj = Join-Path $root 'cli\TuiPreview.Cli.csproj'
+$toolDir = Join-Path $extDir 'tool'
+$packProjects = @(
+    (Join-Path $root 'cli\TuiPreview.Cli.csproj'),
+    (Join-Path $root 'controls\TuiControls\TuiControls.csproj')
+)
 if (-not $Feed) { $Feed = Join-Path $root 'nupkg' }
 
 function Write-Step([string] $message) {
@@ -64,28 +70,43 @@ function Fail([string] $message) {
     exit 1
 }
 
-# --- 1. the host and the sample app that references it ---
-if ($SkipHost) {
-    Write-Step 'skipping the host build (-SkipHost)'
+# --- 1. the tool, TuiControls and the sample app ---
+if ($SkipBuild) {
+    Write-Step 'skipping the build (-SkipBuild)'
 } else {
-    Write-Step 'building TuiPreview.Host and the sample app'
-    foreach ($proj in $hostProj, $sampleProj) {
-        & dotnet build $proj --nologo -v quiet
-        if ($LASTEXITCODE -ne 0) { Fail "dotnet build $(Split-Path $proj -Leaf) failed" }
-    }
+    Write-Step 'building cli.slnx'
+    & dotnet build $solution --nologo -v quiet
+    if ($LASTEXITCODE -ne 0) { Fail 'dotnet build cli.slnx failed' }
+
+    # Emptied first, so a file the tool no longer ships cannot linger in the VSIX.
+    Write-Step "publishing the tool into $toolDir"
+    if (Test-Path $toolDir) { Remove-Item $toolDir -Recurse -Force }
+    & dotnet publish $cliProj -c Release --nologo -v quiet -o $toolDir
+    if ($LASTEXITCODE -ne 0) { Fail 'dotnet publish TuiPreview.Cli failed' }
+}
+
+if (-not (Test-Path (Join-Path $toolDir 'tuipreview.dll'))) {
+    Fail "$toolDir has no tuipreview.dll; run once without -SkipBuild"
 }
 
 if ($Pack) {
-    Write-Step "packing TuiPreview.Host into $Feed"
-    & dotnet pack $hostProj --nologo -v quiet -o $Feed
-    if ($LASTEXITCODE -ne 0) { Fail 'dotnet pack failed' }
+    Write-Step "packing TuiPreview.Cli and TuiControls into $Feed"
+    foreach ($proj in $packProjects) {
+        & dotnet pack $proj --nologo -v quiet -o $Feed
+        if ($LASTEXITCODE -ne 0) { Fail "dotnet pack $(Split-Path $proj -Leaf) failed" }
+    }
 
     # NuGet caches a package by id and version, so a repack of the same version is ignored
     # until the cached copy is removed.
-    $cached = Join-Path $env:USERPROFILE '.nuget\packages\tuipreview.host'
-    if (Test-Path $cached) {
-        Write-Host "    note: $cached exists; bump <Version> in the csproj, or delete that folder, for apps to pick up this build" -ForegroundColor DarkGray
+    foreach ($id in 'tuipreview.cli', 'tuicontrols') {
+        $cached = Join-Path $env:USERPROFILE ".nuget\packages\$id"
+        if (Test-Path $cached) {
+            Write-Host "    note: $cached exists; bump <Version> in the csproj, or delete that folder, to pick up this build" -ForegroundColor DarkGray
+        }
     }
+    Write-Host "    install the tool with: dotnet tool update -g TuiPreview.Cli --add-source `"$Feed`"" -ForegroundColor DarkGray
+    # --add-source is refused when the NuGet config uses package source mapping.
+    Write-Host "    (with package source mapping on, map TuiPreview.Cli to that feed in NuGet.config, or pass --configfile)" -ForegroundColor DarkGray
 }
 
 # --- 2. dependencies, so a fresh clone works without a separate npm install ---
@@ -115,7 +136,7 @@ if ($Dev) {
     Write-Step 'launching the Extension Development Host'
     & code --extensionDevelopmentPath="$extDir" --new-window "$root"
     if ($LASTEXITCODE -ne 0) { Fail 'could not launch the development host' }
-    Write-Host "`nDone. Right-click samples\HostedApp\MainView.tui.cs in the new window." -ForegroundColor Green
+    Write-Host "`nDone. Right-click samples\SampleApp\MainView.tui.cs in the new window." -ForegroundColor Green
     exit 0
 }
 
@@ -167,5 +188,5 @@ Write-Host ''
 Write-Host 'Now run this in VS Code:' -ForegroundColor Green
 Write-Host '  Developer: Reload Window' -ForegroundColor Yellow
 Write-Host ''
-Write-Host 'Then check the status bar shows that build id, and right-click a .tui.cs in an app that' -ForegroundColor DarkGray
-Write-Host 'references TuiPreview.Host (for example samples\HostedApp\MainView.tui.cs).' -ForegroundColor DarkGray
+Write-Host 'Then check the status bar shows that build id, and right-click a .tui.cs view' -ForegroundColor DarkGray
+Write-Host '(for example samples\SampleApp\MainView.tui.cs).' -ForegroundColor DarkGray

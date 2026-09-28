@@ -1,40 +1,33 @@
 using CommandLine;
 using CommandLine.Text;
-using TuiPreview.Host.Preview;
+using TuiPreview.Cli.Preview;
 
-namespace TuiPreview.Host;
+namespace TuiPreview.Cli;
 
 /// <summary>
-/// Parses the command line and runs one preview mode. Shared by cli.exe and
-/// <see cref="TuiPreviewHost.TryRun"/>, so both paths build and render the same way.
+/// Parses the command line and runs one preview mode.
 /// <para>
-/// Runs inside someone else's process when hosted: it never calls <c>Environment.Exit</c>,
-/// always returns, and puts back the console state it changes.
+/// Never calls <c>Environment.Exit</c>, always returns, and puts back the console state it
+/// changes, so a terminal the tool ran in is left the way it was found.
 /// </para>
 /// </summary>
 internal static class PreviewRunner
 {
-  /// <param name="requireProject">True for cli.exe, which reads <c>--project</c> with MSBuild.</param>
-  /// <param name="contextFor">Creates the source of the project context, once per run.</param>
-  public static int Run(string[] args, bool requireProject, Func<Options, Func<ProjectContext>> contextFor)
+  public static int Run(string[] args)
   {
     // HelpWriter is disabled so that Fail() stays the single place that renders help,
     // which keeps --help and parse errors on one consistent path.
     using var parser = new Parser(settings => settings.HelpWriter = null);
 
     var result = parser.ParseArguments<Options>(args);
-    return result.MapResult(o => Run(o, requireProject, contextFor), errors => Fail(result, errors));
+    return result.MapResult(Run, errors => Fail(result, errors));
   }
 
-  private static int Run(Options options, bool requireProject, Func<Options, Func<ProjectContext>> contextFor)
+  private static int Run(Options options)
   {
     var problems = new List<string>();
 
     CheckFile(options.ViewCs ?? string.Empty, "--view", problems);
-    if (requireProject)
-    {
-      CheckFile(options.Project, "--project", problems);
-    }
     CheckNonEmpty(options.Class, "--class", problems);
 
     foreach (string extra in options.Extra ?? Enumerable.Empty<string>())
@@ -58,10 +51,9 @@ internal static class PreviewRunner
     try
     {
       Console.WriteLine($"{"view",-10}: {Path.GetFullPath(options.ViewCs!)}");
-      Console.WriteLine($"{"proj",-10}: {(requireProject ? Path.GetFullPath(options.Project) : "(running app)")}");
       Console.WriteLine($"{"class",-10}: {options.Class}");
 
-      return RunPreview(options, contextFor(options));
+      return RunPreview(options);
     }
     finally
     {
@@ -69,7 +61,7 @@ internal static class PreviewRunner
     }
   }
 
-  private static int RunPreview(Options options, Func<ProjectContext> context)
+  private static int RunPreview(Options options)
   {
     string className = options.Class;
     int width = options.Width;
@@ -90,7 +82,7 @@ internal static class PreviewRunner
         .ToArray();
 
     Func<RenderPipeline.BuildResult> build =
-        () => RenderPipeline.BuildClass(source, className, extras, context());
+        () => RenderPipeline.BuildClass(source, className, extras);
 
     if (options.Interactive)
     {

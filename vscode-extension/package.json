@@ -1,7 +1,7 @@
 {
   "name": "tui-live-preview",
-  "displayName": "Terminal.Gui XAML Live Preview",
-  "description": "Preview .tui.xaml files as real Terminal.Gui views, straight from the editor context menu.",
+  "displayName": "Terminal.Gui Live Preview",
+  "description": "Preview .tui.cs views as real Terminal.Gui views, straight from the editor context menu.",
   "version": "0.1.0",
   "publisher": "clara",
   "license": "MIT",
@@ -15,28 +15,17 @@
   "keywords": [
     "terminal.gui",
     "tui",
-    "xaml",
     "preview"
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onLanguage:xml",
     "onCommand:tuiLivePreview.render",
     "onCommand:tuiLivePreview.watch",
     "onCommand:tuiLivePreview.interactive",
-    "onCommand:tuiLivePreview.showGeneratedCode",
     "onCommand:tuiLivePreview.stopAll",
     "onCommand:tuiLivePreview.showLog"
   ],
   "contributes": {
-    "languages": [
-      {
-        "id": "xml",
-        "extensions": [
-          ".tui.xaml"
-        ]
-      }
-    ],
     "commands": [
       {
         "command": "tuiLivePreview.render",
@@ -56,11 +45,6 @@
       {
         "command": "tuiLivePreview.stopAll",
         "title": "Stop All",
-        "category": "TUI Preview"
-      },
-      {
-        "command": "tuiLivePreview.showGeneratedCode",
-        "title": "Show Generated C#",
         "category": "TUI Preview"
       },
       {
@@ -85,11 +69,6 @@
           "command": "tuiLivePreview.watch",
           "when": "resourceFilename =~ /\\.tui\\.cs$/",
           "group": "7_modification@3"
-        },
-        {
-          "command": "tuiLivePreview.showGeneratedCode",
-          "when": "resourceFilename =~ /\\.tui\\.cs$/",
-          "group": "7_modification@4"
         }
       ],
       "editor/context": [
@@ -107,11 +86,6 @@
           "command": "tuiLivePreview.watch",
           "when": "resourceFilename =~ /\\.tui\\.cs$/",
           "group": "7_modification@3"
-        },
-        {
-          "command": "tuiLivePreview.showGeneratedCode",
-          "when": "resourceFilename =~ /\\.tui\\.cs$/",
-          "group": "7_modification@4"
         }
       ],
       "commandPalette": [
@@ -126,38 +100,21 @@
         {
           "command": "tuiLivePreview.interactive",
           "when": "resourceFilename =~ /\\.tui\\.cs$/"
-        },
-        {
-          "command": "tuiLivePreview.showGeneratedCode",
-          "when": "resourceFilename =~ /\\.tui\\.cs$/"
         }
       ]
     },
     "configuration": {
-      "title": "Terminal.Gui XAML Live Preview",
+      "title": "Terminal.Gui Live Preview",
       "properties": {
         "tuiLivePreview.cliPath": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Absolute path to the preview CLI. Accepts a built `cli.exe`/`cli.dll`, or a `.csproj` (which is run with `dotnet run`). When empty, the extension searches the workspace for `cli/bin/*/net*/cli.exe` and falls back to `dotnet run --project cli/cli.csproj`."
-        },
-        "tuiLivePreview.launchMode": {
-          "type": "string",
-          "enum": [
-            "auto",
-            "app"
-          ],
-          "enumDescriptions": [
-            "Host the preview in the view's own app when that app references TuiPreview.Host, otherwise use the CLI.",
-            "Always host the preview in the view's own app; fail if it does not reference TuiPreview.Host."
-          ],
-          "default": "auto",
-          "markdownDescription": "Where the preview runs. An app that references `TuiPreview.Host` and calls `TuiPreviewHost.TryRun(args, out int code)` first in `Main` hosts it itself: the extension builds the app, runs a copy of its output with `--tui-preview`, and the view compiles against exactly what the app runs with."
+          "markdownDescription": "Path to the `tuipreview` tool: a built `tuipreview.exe`, a `tuipreview.dll` (run with `dotnet`), or a `.csproj` (run with `dotnet run`). Leave empty to use the copy bundled with the extension. A workspace that contains the tool's source (`cli/bin/*/net*/tuipreview.exe` or `cli/TuiPreview.Cli.csproj`) uses that instead, so changes to the tool show up right away."
         },
         "tuiLivePreview.className": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Override for the `--class` argument. When empty, it is read from the `x:Class` attribute of the XAML being previewed, and you are only prompted if that attribute is missing."
+          "markdownDescription": "Override for the `--class` argument. When empty, it is read from the namespace and class declaration of the `.tui.cs` being previewed, and you are only prompted if none is found."
         },
         "tuiLivePreview.width": {
           "type": "number",

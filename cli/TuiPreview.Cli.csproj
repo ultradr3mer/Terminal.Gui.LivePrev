@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>tuipreview</AssemblyName>
+    <RootNamespace>TuiPreview.Cli</RootNamespace>
+    <!-- Roslyn ships a dozen translations of its messages. English only keeps the copy bundled
+         in the VSIX and the tool package small. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <IsPackable>true</IsPackable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>tuipreview</ToolCommandName>
+    <PackageId>TuiPreview.Cli</PackageId>
+    <Version>0.2.0</Version>
+    <Description>Live preview for Terminal.Gui .tui.cs views: tuipreview --view MyView.tui.cs --class My.Namespace.MyView</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommandLineParser" Version="2.9.1" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.3.0" />
+    <!-- Upper bound: Terminal.Gui 2.x breaks binary compatibility between minor versions, and
+         the chrome is compiled against this one. -->
+    <PackageReference Include="Terminal.Gui" Version="[2.5.0,2.6)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Part of the default reference set: a .tui.cs may use these controls. -->
+    <ProjectReference Include="..\controls\TuiControls\TuiControls.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -3,11 +3,13 @@ using System.Reflection;
 using System.Runtime.Loader;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
 using Terminal.Gui.App;
 using Terminal.Gui.Drivers;
+using Terminal.Gui.ViewBase;
 
-namespace TuiPreview.Host.Preview;
+namespace TuiPreview.Cli.Preview;
 
 /// <summary>
 /// Compiles a view file in memory, loads it into a collectible context and renders it:
@@ -33,7 +35,7 @@ internal static class RenderPipeline
         public IEnumerable<Diagnostic> AllDiagnostics =>
             GeneratorDiagnostics.Concat(CompileDiagnostics);
 
-        /// <summary>True when the generator produced no C# at all (parse/validation rejected the XAML).</summary>
+        /// <summary>True when nothing reached the compiler. No step produces these today.</summary>
         public bool HasNoGeneratedCode =>
             GeneratorDiagnostics.Any(d => d.Severity == DiagnosticSeverity.Error);
     }
@@ -56,73 +58,110 @@ internal static class RenderPipeline
     }
 
     /// <summary>
-    /// Builds a view from a plain C# file, with no XAML and no source generator involved.
+    /// Builds the layout half of a view, the way TerminalGuiDesigner builds a .Designer.cs.
     /// <para>
-    /// The file is expected to be a complete class deriving from a Terminal.Gui top-level
-    /// (<c>Window</c>, <c>Runnable</c>, or anything implementing <see cref="IRunnable"/>) with a
-    /// public parameterless constructor, and it is compiled on its own. There is no generated
-    /// half and no synthesised stub: the class does not have to be <c>partial</c>, and nothing is
-    /// written to disk.
+    /// A view is split in two, like a designer file and its code-behind. <c>X.tui.cs</c> holds
+    /// <c>partial class X</c> with its controls and an <c>InitializeComponent()</c> that
+    /// composes them, and uses nothing but the framework, Terminal.Gui and TuiControls.
+    /// <c>X.cs</c> holds the real constructor, which calls <c>InitializeComponent()</c> and then
+    /// wires up the logic with whatever dependencies the app has. Only the first half is
+    /// compiled here, together with a stub constructor that does nothing but lay out, so the
+    /// preview never needs the app, its packages or its build.
     /// </para>
     /// <para>
-    /// This is the only build path left. The XAML generator, its test host and both XSDs were
-    /// removed: the schema lagged the control list it was generated from, and an attribute it did
-    /// not recognise was dropped with only a warning, so a view that looked right in the editor
-    /// could silently be missing controls at runtime.
+    /// A self-contained view that declares its own parameterless constructor gets no stub and is
+    /// compiled as it is.
     /// </para>
     /// </summary>
     /// <param name="sourcePath">The .tui.cs file defining the view.</param>
     /// <param name="className">Fully qualified name of the class to instantiate.</param>
     /// <param name="extraSourcePaths">
-    /// Further files compiled into the same assembly - a ViewModel, a partial half split out of a
-    /// large view, or a shared control the view depends on. A single file is the common case and
-    /// the default, but a view that references a type declared elsewhere cannot compile without
-    /// this: the contract is one class, not one file.
-    /// </param>
-    /// <param name="project">
-    /// The project the view belongs to: its references, usings and language settings. Null, or a
-    /// context that could not be read, compiles against the host's own assemblies instead.
+    /// Further files compiled into the same assembly, against the same references: a layout
+    /// split out of a large view, or a small control the view is being written alongside.
     /// </param>
     public static BuildResult BuildClass(string sourcePath, string className,
-        IReadOnlyList<string>? extraSourcePaths = null, ProjectContext? project = null)
+        IReadOnlyList<string> extraSourcePaths)
     {
-        bool useProject = project is { IsHostFallback: false };
-
-        var parseOptions = new CSharpParseOptions(
-            useProject ? project!.LanguageVersion : LanguageVersion.Latest,
-            preprocessorSymbols: useProject ? project!.PreprocessorSymbols : null);
+        var parseOptions = new CSharpParseOptions(LanguageVersion.Latest);
+        SyntaxTree view = CSharpSyntaxTree.ParseText(
+            File.ReadAllText(sourcePath), parseOptions, path: sourcePath);
         var trees = new List<SyntaxTree>
         {
-            CSharpSyntaxTree.ParseText(
-                File.ReadAllText(sourcePath), parseOptions, path: sourcePath)
+            view,
+            // What ImplicitUsings gives a Microsoft.NET.Sdk project. A view written in such a
+            // project leans on these, and in one without them they are merely unused.
+            CSharpSyntaxTree.ParseText(ImplicitUsings, parseOptions, path: "TuiPreview.GlobalUsings.g.cs"),
         };
 
-        foreach (string extra in extraSourcePaths ?? Array.Empty<string>())
+        foreach (string extra in extraSourcePaths)
         {
             trees.Add(CSharpSyntaxTree.ParseText(
                 File.ReadAllText(extra), parseOptions, path: extra));
         }
 
-        // The project's implicit and explicit <Using> items, exactly what the SDK would generate
-        // into obj/*.GlobalUsings.g.cs. Without them a view that compiles in its project fails
-        // here with CS0246 on the first bare EventHandler or List<T>.
-        if (useProject && project!.GlobalUsingsSource.Length > 0)
+        if (ConstructorStub(view, className) is { } stub)
         {
-            trees.Add(CSharpSyntaxTree.ParseText(
-                project.GlobalUsingsSource, parseOptions, path: "TuiPreview.GlobalUsings.g.cs"));
+            trees.Add(CSharpSyntaxTree.ParseText(stub, parseOptions, path: "TuiPreview.Constructor.g.cs"));
         }
 
-        return CompileAndInstantiate(trees, className,
-            project?.Diagnostics ?? ImmutableArray<Diagnostic>.Empty,
-            useProject ? project : null);
+        return CompileAndInstantiate(trees, className);
     }
+
+    /// <summary>
+    /// The stand-in for the logic half: a constructor that only calls
+    /// <c>InitializeComponent()</c>, as the designer's <c>GetGenerateNewViewCode</c> writes it.
+    /// Null when the class has no <c>InitializeComponent()</c> to call, or already has a
+    /// parameterless constructor of its own.
+    /// </summary>
+    private static string? ConstructorStub(SyntaxTree view, string className)
+    {
+        int dot = className.LastIndexOf('.');
+        string ns = dot < 0 ? string.Empty : className[..dot];
+        string name = className[(dot + 1)..];
+
+        ClassDeclarationSyntax? declaration = view.GetRoot()
+            .DescendantNodes()
+            .OfType<ClassDeclarationSyntax>()
+            .FirstOrDefault(c => c.Identifier.ValueText == name);
+
+        if (declaration is null)
+        {
+            return null;
+        }
+
+        bool hasInitialize = declaration.Members
+            .OfType<MethodDeclarationSyntax>()
+            .Any(m => m.Identifier.ValueText == "InitializeComponent" && m.ParameterList.Parameters.Count == 0);
+
+        bool hasConstructor = declaration.Members
+            .OfType<ConstructorDeclarationSyntax>()
+            .Any(c => c.ParameterList.Parameters.Count == 0 && !c.Modifiers.Any(SyntaxKind.StaticKeyword));
+
+        if (!hasInitialize || hasConstructor)
+        {
+            return null;
+        }
+
+        // No modifiers and no base list: a partial part may leave both to the other parts.
+        string type = $"partial class {name} {{ public {name}() {{ InitializeComponent(); }} }}";
+        return ns.Length == 0 ? type : $"namespace {ns} {{ {type} }}";
+    }
+
+    private const string ImplicitUsings = """
+        global using global::System;
+        global using global::System.Collections.Generic;
+        global using global::System.IO;
+        global using global::System.Linq;
+        global using global::System.Net.Http;
+        global using global::System.Threading;
+        global using global::System.Threading.Tasks;
+        """;
 
     /// <summary>
     /// Renders an already-built view to characters, as plain text and as ANSI.
     /// <para>
-    /// The frame-capture half of <see cref="Run"/>, separated so that a caller holding a
-    /// <see cref="BuildResult"/> from either entry point (the XAML generator or
-    /// <see cref="BuildClass"/>) can render it without going back through a build.
+    /// Separate from <see cref="BuildClass"/> so that a caller holding a
+    /// <see cref="BuildResult"/> can render it without going back through a build.
     /// </para>
     /// </summary>
     public static Result Capture(IRunnable runnable, int width, int height)
@@ -142,35 +181,24 @@ internal static class RenderPipeline
     /// <summary>
     /// Compiles the given sources into a collectible context and instantiates
     /// <paramref name="className"/>.
-    /// <para>
-    /// Shared by the XAML and the C# entry points so the two cannot drift: identical reference
-    /// set, identical load strategy, identical diagnostics filtering. The only thing that
-    /// differs between them is which syntax trees arrive here.
-    /// </para>
     /// </summary>
     private static BuildResult CompileAndInstantiate(
-        List<SyntaxTree> trees, string className, ImmutableArray<Diagnostic> projectDiags,
-        ProjectContext? project)
+        List<SyntaxTree> trees, string className)
     {
-        // Project diagnostics are warnings about the reference set, not generator output, so
-        // they travel with the compile diagnostics and never make HasNoGeneratedCode true.
         var genDiags = ImmutableArray<Diagnostic>.Empty;
 
-        IEnumerable<MetadataReference> references = project is null
-            ? BuildReferences()
-            : project.CompileReferences.Select(ReferenceFor);
-
         CSharpCompilation compilation = CSharpCompilation.Create(
-            // Fixed on purpose: a project grants the preview its internals with
-            // <InternalsVisibleTo Include="TuiPreview" />, which matches on this name.
+            // Fixed, so a diagnostic or a stack trace always names the preview the same way.
             assemblyName: "TuiPreview",
             syntaxTrees: trees,
-            references: references,
+            references: DefaultReferences(),
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-                .WithNullableContextOptions(project?.Nullable ?? NullableContextOptions.Disable)
+                // Annotations: a view may write string? whether or not its project enables
+                // nullable, and the log is not flooded with flow warnings it would not get there.
+                .WithNullableContextOptions(NullableContextOptions.Annotations)
                 // CS0436: a type in source also exists in a referenced assembly. That is the
-                // point when previewing a file of the project itself - the source copy wins, so
-                // the preview shows the edit rather than the last build.
+                // point when previewing a control from TuiControls itself - the source copy
+                // wins, so the preview shows the edit rather than the last build.
                 .WithSpecificDiagnosticOptions(new Dictionary<string, ReportDiagnostic>
                 {
                     ["CS0436"] = ReportDiagnostic.Suppress,
@@ -179,8 +207,9 @@ internal static class RenderPipeline
         using var peStream = new MemoryStream();
         EmitResult emit = compilation.Emit(peStream);
 
-        ImmutableArray<Diagnostic> compileDiags = projectDiags.AddRange(emit.Diagnostics
-            .Where(d => d.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning));
+        ImmutableArray<Diagnostic> compileDiags = emit.Diagnostics
+            .Where(d => d.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning)
+            .ToImmutableArray();
 
         if (!emit.Success)
         {
@@ -192,21 +221,9 @@ internal static class RenderPipeline
         // isCollectible: the context is intentionally NOT unloaded before the view is disposed.
         // The interactive host swaps views in and out, and unloading under a live view would
         // fault. The context is left to the GC once the host itself goes away.
+        // Everything the view references is already loaded by the tool itself, so the default
+        // context resolves it and Terminal.Gui above all stays shared with the view.
         var alc = new AssemblyLoadContext("tui-preview", isCollectible: true);
-
-        // Resolving fires only after the default context has failed, so whatever the host
-        // already runs - Terminal.Gui above all - stays shared with the view. Only the project's
-        // own assemblies and its NuGet packages come from here. Loaded from bytes so the user's
-        // bin folder is never locked and the project can be rebuilt while the preview runs.
-        if (project is not null)
-        {
-            alc.Resolving += (context, name) =>
-                name.Name is { } simple &&
-                project.RuntimeAssemblies.TryGetValue(simple, out string? path) &&
-                File.Exists(path)
-                    ? context.LoadFromStream(new MemoryStream(File.ReadAllBytes(path)))
-                    : null;
-        }
 
         Assembly asm = alc.LoadFromStream(peStream);
 
@@ -259,35 +276,36 @@ internal static class RenderPipeline
     }
 
     /// <summary>
-    /// The fallback reference set, used when the project could not be read: the running
-    /// framework's assemblies plus Terminal.Gui - everything the host itself was built against.
+    /// What a <c>.tui.cs</c> may use: the shared framework, Terminal.Gui and TuiControls, the
+    /// same short list TerminalGuiDesigner compiles its designer files against. A view that
+    /// reaches for anything else fails with CS0246 here instead of quietly dragging the app's
+    /// dependencies into its layout.
     /// <para>
-    /// The host's own assembly is included. A file under preview that also exists in it (the
-    /// chrome, the splitter) does not conflict in a way that matters: Roslyn binds to the source
-    /// copy and reports CS0436, which the compilation suppresses.
+    /// This is the default set, and the one place to append to when the references become
+    /// configurable (a <c>--reference</c> option, say, for a third-party control library).
     /// </para>
     /// </summary>
-    private static IEnumerable<MetadataReference> BuildReferences()
+    private static IEnumerable<MetadataReference> DefaultReferences()
     {
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // The framework only: the tool's own packages (Roslyn, CommandLineParser) are trusted
+        // platform assemblies too, but they sit next to the tool, not in the runtime directory.
+        string runtimeDir = Path.GetFullPath(
+            System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory());
 
         if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string tpa)
         {
             foreach (string path in tpa.Split(Path.PathSeparator))
             {
-                if (path.Length > 0 && File.Exists(path) && seen.Add(path))
+                if (path.Length > 0 && File.Exists(path) &&
+                    Path.GetFullPath(path).StartsWith(runtimeDir, StringComparison.OrdinalIgnoreCase))
                 {
                     yield return ReferenceFor(path);
                 }
             }
         }
 
-        // Terminal.Gui sits next to the running binary thanks to the PackageReference.
-        string tui = Path.Combine(AppContext.BaseDirectory, "Terminal.Gui.dll");
-        if (File.Exists(tui) && seen.Add(tui))
-        {
-            yield return ReferenceFor(tui);
-        }
+        yield return ReferenceFor(typeof(View).Assembly.Location);
+        yield return ReferenceFor(typeof(TuiControls.Splitter).Assembly.Location);
     }
 
     /// <summary>References already read, keyed by path and invalidated by a changed file.</summary>
@@ -295,9 +313,9 @@ internal static class RenderPipeline
         new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// A reference read into memory rather than mapped from disk, so the project's bin folder is
-    /// never held open and the project can be rebuilt while the preview runs. Cached, because a
-    /// project easily has two hundred references and a live preview rebuilds on every keystroke.
+    /// A reference read into memory rather than mapped from disk, so no bin folder is held open
+    /// and TuiControls can be rebuilt while the preview runs. Cached, because the framework alone
+    /// is a hundred and fifty references and a live preview rebuilds on every keystroke.
     /// </summary>
     private static MetadataReference ReferenceFor(string path)
     {

@@ -1,10 +1,10 @@
 using CommandLine;
 
-namespace TuiPreview.Host;
+namespace TuiPreview.Cli;
 
 /// <summary>
-/// Command line contract, shared by cli.exe and <see cref="TuiPreviewHost.TryRun"/>:
-///   --view "path" --class "Namespace.Name" [--project "path"] [--interactive | --watch]
+/// Command line contract of the <c>tuipreview</c> tool:
+///   --view "path" --class "Namespace.Name" [--interactive | --watch]
 /// </summary>
 internal sealed class Options
 {
@@ -12,17 +12,13 @@ internal sealed class Options
   [Option("view", Required = true, HelpText = "Path to a .tui.cs file defining the view.")]
   public string? ViewCs { get; set; }
 
-  // Not Required here: cli.exe checks it itself, and inside the app the running app is the project.
-  [Option('p', "project", Required = false, HelpText = "Path to the project file. Required for cli.exe; ignored with --tui-preview inside the app.")]
-  public string Project { get; set; } = string.Empty;
-
   [Option('c', "class", Required = true, HelpText = "Name of the class to preview.")]
   public string Class { get; set; } = string.Empty;
 
   [Option("display-name", Required = false, HelpText = "The real file a mirrored copy came from, used only for the window title. Pass it when --view is a scratch copy whose name the user should never see.")]
   public string? DisplayName { get; set; }
 
-  [Option("extra", Required = false, HelpText = "Further .cs files compiled together with --view, for types you are editing alongside the view. Types from --project are available without this; a file passed here takes precedence over the project's last build of the same type. Space-separated for several.")]
+  [Option("extra", Required = false, HelpText = "Further .cs files compiled together with --view, against the same reference set (the framework, Terminal.Gui and TuiControls). For layout-only helpers, not the logic half of the view. Space-separated for several.")]
   public IEnumerable<string>? Extra { get; set; }
 
   // Accepted for older command lines; rendering is the default anyway.

@@ -1,61 +1,44 @@
-import * as cp from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 
-/** The three ways a preview can be launched; they map 1:1 onto the CLI's own flags. */
+/** The three ways a preview can be launched; they map 1:1 onto the tool's own flags. */
 type Mode = "render" | "watch" | "interactive";
 
 /**
- * How the preview will be invoked: the CLI as a built binary or through `dotnet run`, or the
- * view's own app, which hosts the preview itself through TuiPreview.Host.
+ * How the `tuipreview` tool will be invoked: as an executable (a build, or the dotnet tool on
+ * PATH), as a framework-dependent dll run by `dotnet` (the copy bundled with the extension), or
+ * through `dotnet run` on its project.
  */
 type Launcher =
     | { kind: "exe"; command: string }
-    | { kind: "dotnet"; project: string }
-    /** `dll` is the shadow copy to run, set by {@link prepareApp} just before launching. */
-    | { kind: "app"; project: string; dll?: string };
+    | { kind: "dll"; path: string }
+    | { kind: "dotnet"; project: string };
 
 interface Resolved {
     launcher: Launcher;
 
-    /** Which of the two authoring paths this is. Decides --xaml vs --view. */
-    kind: ViewKind;
-
-    /** The file the user picked, on disk. */
-    xaml: string;
+    /** The .tui.cs the user picked, on disk. */
+    view: string;
     className: string;
 
     /**
-     * The file the CLI should actually read, and the real file it mirrors.
-     *
-     * Usually the same path. They differ when the editor is holding unsaved changes: the CLI
-     * can only read from disk, so it gets the scratch copy, and `codeBehind` has to be passed
-     * explicitly because the scratch copy has no sibling `.cs` of its own.
+     * The file the tool should actually read. Usually `view` itself; the scratch copy when the
+     * editor holds unsaved changes, because the tool can only read from disk.
      */
     previewPath: string;
-    codeBehind?: string;
 }
 
 /**
- * Live terminals, keyed by XAML path *and* purpose.
+ * Live terminals, keyed by view path.
  *
- * Keying by path alone is not enough: terminal env is fixed at creation, so a generated-code
- * dump (TUI_DUMP=1) that reused a terminal opened for a normal preview (TUI_ANSI=0) would
- * silently never dump. Purposes therefore get separate terminals.
- *
- * Reuse within a purpose is still deliberate. Watch and interactive modes run until stopped,
- * so a new terminal per invocation would leak one process per right-click with no obvious
- * way to find them.
+ * Reuse is deliberate. Watch and interactive modes run until stopped, so a new terminal per
+ * invocation would leak one process per right-click with no obvious way to find them.
  */
 const terminals = new Map<string, vscode.Terminal>();
 
-/** The shadow copy each hosted-app preview runs from, deleted when its terminal closes. */
-const appCopies = new Map<vscode.Terminal, string>();
-
-/** Disposables for onDidCloseTerminal, so the extension host can tear them down. */
 const subscriptions: vscode.Disposable[] = [];
 
 /**
@@ -76,26 +59,26 @@ function logLine(message: string): void {
  * Surfaced in the status bar and the log so "command not found" is never a mystery: a
  * stale host runs old code while VS Code shows the new menu entries from package.json.
  */
-const BUILD = "2026-09-28.1";
+const BUILD = "2026-09-28.3";
 
 /** Shows which build is live, so a stale Extension Development Host is immediately visible. */
 let status: vscode.StatusBarItem | undefined;
 
+/** Where the extension is installed, and so where its bundled copy of the tool lives. */
+let extensionRoot: string | undefined;
+
 /**
- * Scratch copies of the XAML, keyed by the real file's path.
+ * Scratch copies of views, keyed by the real file's path.
  *
- * The CLI reads the XAML from disk, so previewing an unsaved buffer means writing that buffer
- * somewhere the CLI can read. The path has to be *stable* across edits, because the interactive
- * host notices changes by polling that file's timestamp: a fresh temp file per keystroke would
- * leave the running preview watching a path that no longer exists. One file per real XAML,
- * rewritten in place, is what makes the existing poll-and-rebuild machinery work unmodified.
- *
- * The temp file also has to keep the `.tui.xaml` extension, because the pipeline keys the
- * generated class and the code-behind convention off the file name.
+ * The tool reads the view from disk, so previewing an unsaved buffer means writing that buffer
+ * somewhere the tool can read. The path has to be *stable* across edits, because the
+ * interactive preview notices changes by polling that file's timestamp: a fresh temp file per
+ * keystroke would leave the running preview watching a path that no longer exists. One file
+ * per real view, rewritten in place, is what makes the poll-and-rebuild machinery work.
  */
 const scratchFiles = new Map<string, string>();
 
-/** Where a real XAML's unsaved buffer is mirrored, created on first use. */
+/** Where a real view's unsaved buffer is mirrored, created on first use. */
 function scratchPathFor(realPath: string): string {
     const existing = scratchFiles.get(realPath);
     if (existing) {
@@ -108,11 +91,8 @@ function scratchPathFor(realPath: string): string {
     const dir = path.join(os.tmpdir(), "tui-live-preview");
     fs.mkdirSync(dir, { recursive: true });
 
-    // The suffix is preserved, and it has to be. The pipeline keys the code-behind
-    // convention off the file name, and the extension keys its own file matching off it, so a
-    // .tui.cs view mirrored to a .tui.xaml name (or vice versa) would change which authoring
-    // path the file is treated as.
-    const suffix = realPath.endsWith(".tui.cs") ? ".tui.cs" : ".tui.xaml";
+    // The suffix is kept so the copy is still recognisably a view in logs and diagnostics.
+    const suffix = ".tui.cs";
     const stem = path.basename(realPath).slice(0, -suffix.length);
     const scratch = path.join(dir, `${stem}-${hash}${suffix}`);
     scratchFiles.set(realPath, scratch);
@@ -124,7 +104,7 @@ function scratchPathFor(realPath: string): string {
  *
  * Writes unconditionally: a document that is clean and one that has been edited back to its
  * saved contents must both be reflected, and mtime granularity makes a same-length rewrite
- * invisible to the CLI's timestamp poll if we skipped it.
+ * invisible to the tool's timestamp poll if we skipped it.
  */
 function mirrorDocument(doc: vscode.TextDocument): string {
     const real = doc.uri.fsPath;
@@ -134,29 +114,6 @@ function mirrorDocument(doc: vscode.TextDocument): string {
     logLine(`mirrored ${path.basename(real)} (${doc.isDirty ? "unsaved" : "saved"}) -> ${scratch}`);
 
     return scratch;
-}
-
-/**
- * The code-behind that belongs with a previewed XAML.
- *
- * Required whenever the XAML being compiled is the scratch copy, because the pipeline's own
- * convention looks for a sibling `.cs` and the scratch file has no siblings. Without this the
- * preview silently falls back to a stub with no ViewModel and every `{Bind ...}` fails to
- * compile, which looks like a generator bug rather than a missing argument.
- *
- * Returns undefined when there is no code-behind at all, so the CLI keeps deriving it itself
- * and behaves exactly as it did before this existed.
- */
-function codeBehindFor(realPath: string): string | undefined {
-    const sibling = realPath.replace(/\.xaml$/i, ".cs");
-    if (fs.existsSync(sibling)) {
-        return sibling;
-    }
-
-    // No sibling: say so once, because the stub's no-op handlers are otherwise a silent
-    // surprise ("the buttons render but do nothing").
-    logLine(`no code-behind beside ${path.basename(realPath)}; handlers will be no-ops`);
-    return undefined;
 }
 
 function showLog(): void {
@@ -196,7 +153,7 @@ async function launch(mode: Mode, picked?: vscode.Uri): Promise<void> {
 
     if (cfg.get<boolean>("confirmation", false)) {
         const answer = await vscode.window.showInformationMessage(
-            `Preview ${path.basename(resolved.xaml)} as ${resolved.className}?`,
+            `Preview ${path.basename(resolved.view)} as ${resolved.className}?`,
             "Start",
             "Cancel"
         );
@@ -205,28 +162,11 @@ async function launch(mode: Mode, picked?: vscode.Uri): Promise<void> {
         }
     }
 
-    let appCopy: string | undefined;
-    if (resolved.launcher.kind === "app") {
-        resolved.launcher.dll = await prepareApp(resolved.launcher.project);
-        appCopy = path.dirname(resolved.launcher.dll);
-
-        // A fresh terminal: typing the new command into one whose preview still runs would
-        // arrive as keystrokes. Closing it also releases its shadow copy.
-        const running = terminals.get(resolved.xaml);
-        if (running) {
-            terminals.delete(resolved.xaml);
-            running.dispose();
-        }
-    }
-
-    // One shared terminal per XAML across render/watch/interactive: those are all previews
+    // One shared terminal per view across render/watch/interactive: those are all previews
     // of the same view, and each is a long-running process that must not be duplicated.
-    const terminal = openTerminal(resolved.xaml, label, {
+    const terminal = openTerminal(resolved.view, label, {
         TUI_ANSI: cfg.get<boolean>("ansi", false) ? "1" : "0",
     });
-    if (appCopy) {
-        appCopies.set(terminal, appCopy);
-    }
 
     const command = commandPrefix(resolved.launcher) + commandLine(resolved, extra);
     logLine(`running: ${command}`);
@@ -238,7 +178,7 @@ async function launch(mode: Mode, picked?: vscode.Uri): Promise<void> {
 }
 
 /**
- * Resolves the target file, its class name and how to launch the CLI.
+ * Resolves the target file, its class name and how to launch the tool.
  *
  * Each step throws a message naming the missing piece, because "it didn't work" is the
  * least useful thing an extension can tell you.
@@ -254,25 +194,16 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         throw new Error("Only files on disk can be previewed (unsaved editors are not supported).");
     }
 
-    // A .tui.cs with a .tui.xaml beside it is that file's code-behind, so the file to preview
-    // is the XAML. `xaml` is what the user acted on; `source` is what the CLI reads.
-    const target = resolveViewTarget(clicked.fsPath);
-    if (!target) {
+    const view = clicked.fsPath;
+    if (!isViewEntry(view)) {
         throw new Error(
-            `${path.basename(clicked.fsPath)} is not a previewable view. ` +
+            `${path.basename(view)} is not a previewable view. ` +
             `Expected a name ending in .tui.cs.`
         );
     }
 
-    // The title, the .previewrc and the code-behind lookup are all keyed on the file the user
-    // recognises. For a paired view that is the .tui.cs they right-clicked, not the scratch
-    // copy of the XAML behind it.
-    const xaml = clicked.fsPath;
-    const kind = target.kind;
-    const source = target.source;
-
-    const className = await resolveClassName(vscode.Uri.file(source), kind);
-    const launcher = resolveLauncher(xaml);
+    const className = await resolveClassName(view);
+    const launcher = resolveLauncher();
 
     // Whether to mirror the editor buffer rather than trusting what is on disk. Off means the
     // preview always reflects the last save, which is what you want from a scripted render and
@@ -280,44 +211,36 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
     const cfg = vscode.workspace.getConfiguration("tuiLivePreview");
     const live = cfg.get<boolean>("live", true);
 
-    // Mirror whichever file actually holds the view, so an unsaved edit to either half lands.
     const openDoc = vscode.workspace.textDocuments.find(
-        (d) => d.uri.scheme === "file" && d.uri.fsPath === source
+        (d) => d.uri.scheme === "file" && d.uri.fsPath === view
     );
 
-    let previewPath = source;
+    let previewPath = view;
     if (openDoc && live) {
         previewPath = mirrorDocument(openDoc);
     } else if (openDoc?.isDirty) {
         logLine(
-            `${path.basename(source)} has unsaved changes, but tuiLivePreview.live is off; ` +
+            `${path.basename(view)} has unsaved changes, but tuiLivePreview.live is off; ` +
             `previewing the last saved version.`
         );
     }
 
-    // A paired XAML needs its own code-behind named explicitly, because the scratch copy of
-    // the XAML has no sibling. A standalone .tui.cs view is the whole class and gets none.
-    const codeBehind = kind === "tuiXaml" ? codeBehindFor(source) : undefined;
-
     logLine(
-        `resolved: ${kind} xaml=${xaml} source=${source} class=${className} ` +
+        `resolved: view=${view} class=${className} ` +
         `launcher=${describeLauncher(launcher)}` +
-        (previewPath === source ? "" : ` preview=${previewPath}`) +
-        (codeBehind ? ` codeBehind=${codeBehind}` : "")
+        (previewPath === view ? "" : ` preview=${previewPath}`)
     );
 
     return {
         launcher,
-        kind,
-        xaml,
+        view,
         className,
         previewPath,
-        codeBehind,
     };
 }
 
 /**
- * Picks the XAML to preview.
+ * Picks the view to preview.
  *
  * Order matters and the first entry is the important one: when invoked from a context menu
  * VS Code passes the clicked resource, which is authoritative. Right-clicking a file in the
@@ -363,13 +286,9 @@ function findViewFile(root: string, depth = 4): string | undefined {
     }
 
     // Files before directories: an explicit top-level Counter.tui.cs beats a nested one.
-    // .tui.cs is checked first because it needs no generator and is the preferred authoring
-    // path, so a workspace holding both should find the C# view first.
-    for (const wanted of [".tui.cs", ".tui.xaml"] as const) {
-        for (const entry of entries) {
-            if (entry.isFile() && entry.name.endsWith(wanted)) {
-                return path.join(root, entry.name);
-            }
+    for (const entry of entries) {
+        if (entry.isFile() && isViewEntry(entry.name)) {
+            return path.join(root, entry.name);
         }
     }
 
@@ -390,21 +309,11 @@ function findViewFile(root: string, depth = 4): string | undefined {
 /**
  * Determines the `--class` value.
  *
- * The CLI requires it and will not infer it, so this is the friction the context menu
- * exists to remove: read `x:Class` out of the XAML and only prompt if it is absent.
+ * The tool requires it and will not infer it, so this is the friction the context menu exists
+ * to remove: read the namespace and class declaration out of the file, and only ask when that
+ * yields nothing.
  */
-/**
- * Determines the `--class` value.
- *
- * The CLI requires it and will not infer it, so this is the friction the context menu
- * exists to remove. Each source states its own class name, in its own way:
- *
- *   `.tui.xaml` - the `x:Class` attribute
- *   `.tui.cs`   - the `namespace` plus the class declaration
- *
- * Only when neither yields one does the user get asked.
- */
-async function resolveClassName(uri: vscode.Uri, kind: ViewKind): Promise<string> {
+async function resolveClassName(file: string): Promise<string> {
     const override = vscode.workspace
         .getConfiguration("tuiLivePreview")
         .get<string>("className", "")
@@ -413,27 +322,20 @@ async function resolveClassName(uri: vscode.Uri, kind: ViewKind): Promise<string
         return override;
     }
 
-    if (kind === "tuiCs") {
-        const fromCSharp = readClassFromCSharp(uri.fsPath);
-        if (fromCSharp) {
-            return fromCSharp;
-        }
-    } else {
-        const fromXaml = readXClass(uri.fsPath);
-        if (fromXaml) {
-            return fromXaml;
-        }
+    const fromCSharp = readClassFromCSharp(file);
+    if (fromCSharp) {
+        return fromCSharp;
     }
 
     const entered = await vscode.window.showInputBox({
         title: "TUI Preview: class name",
         prompt:
-            `Could not determine the class name in ${path.basename(uri.fsPath)}. ` +
+            `Could not determine the class name in ${path.basename(file)}. ` +
             `Enter the fully qualified class name.`,
         placeHolder: "MyApp.Views.MyWindow",
         ignoreFocusOut: true,
         validateInput: (value) =>
-            value.trim().length === 0 ? "The CLI requires a non-empty --class." : null,
+            value.trim().length === 0 ? "The tool requires a non-empty --class." : null,
     });
 
     if (!entered) {
@@ -443,93 +345,25 @@ async function resolveClassName(uri: vscode.Uri, kind: ViewKind): Promise<string
 }
 
 /**
- * Extracts x:Class from the XAML text.
- *
- * A regex rather than an XML parser on purpose: these files use a custom namespace
- * (http://schemas.gui-cs.github.io/tui/2026/xaml) and are often mid-edit, so a strict parse
- * would fail on exactly the broken file you most want to preview. Both quote styles are
- * accepted since the attribute is matched in the source, not in a parsed DOM.
- */
-function readXClass(file: string): string | undefined {
-    let text: string;
-    try {
-        text = fs.readFileSync(file, "utf8");
-    } catch {
-        return undefined;
-    }
-
-    const match = /\bx:Class\s*=\s*(["'])([^"']+)\1/.exec(text);
-    return match?.[2]?.trim() || undefined;
-}
-
-/**
- * The two kinds of file this extension previews.
- *
- * A view is authored in one of two ways, and they are not equivalent:
- *
- *   `tuiXaml` - a `.tui.xaml` compiled through the source generator, with an optional
- *               `.tui.cs` code-behind. The generator is the most experimental part of the
- *               tool, so this is the legacy path.
- *   `tuiCs`   - a plain `.tui.cs` compiled on its own, no generator, no stub. The C#
- *               compiler is the only thing between the file and the Terminal.Gui API.
+ * True when the path is a file the user can right-click to preview.
  *
  * The `.tui.cs` suffix is what makes this matchable: a bare `.cs` would put the whole
- * workspace in scope, so the menus would appear on every source file. `.tui.` is the same
- * convention the XAML path already uses for its code-behind.
+ * workspace in scope, so the menus would appear on every source file.
  */
-type ViewKind = "tuiXaml" | "tuiCs";
-
-/** True when the path is a file the user can right-click to preview. */
 function isViewEntry(file: string): boolean {
     return file.endsWith(".tui.cs");
 }
 
 /**
- * Resolves a right-clicked `.tui.cs` to the file that should actually be previewed, and how.
- *
- * The two names are the same documented convention for different things, so a `.tui.cs` can
- * be either:
- *
- *   - a **standalone view**, compiled on its own with `--view` and no generator; or
- *   - the **code-behind** of a `.tui.xaml` of the same stem, in which case the file to
- *     preview is that XAML, with its own sibling .cs passed as `--code-behind`.
- *
- * Only the sibling tells them apart, because the two look identical from the name alone. A
- * code-behind cannot be previewed as a view: it is a partial class whose controls exist only
- * in the generated half, so instantiating it standalone cannot work.
- *
- * The menus are offered on `.tui.cs` only. Offering them on `.tui.xaml` too would be
- * redundant for the C# path and would be actively misleading for a paired file, where both
- * entries would appear to preview the same view.
- */
-function resolveViewTarget(file: string): { kind: ViewKind; source: string } | undefined {
-    if (!isViewEntry(file)) {
-        return undefined;
-    }
-
-    const xamlSibling = file.replace(/\.tui\.cs$/, ".tui.xaml");
-    if (fs.existsSync(xamlSibling)) {
-        return { kind: "tuiXaml", source: xamlSibling };
-    }
-
-    return { kind: "tuiCs", source: file };
-}
-
-/** The CLI flag that selects this kind. */
-function sourceFlagFor(kind: ViewKind): "--view" | "--xaml" {
-    return kind === "tuiCs" ? "--view" : "--xaml";
-}
-
-/**
  * Extracts the fully qualified class name from a C# file.
  *
- * Reads `namespace` plus the first type declaration. A `--view` file has no `x:Class` to
- * read, so without this every C# preview would prompt for a name the file already states.
+ * Reads `namespace` plus the first class declaration. Without this every preview would prompt
+ * for a name the file already states.
  *
- * The type declared is taken to be the view: the file is named after it and the CLI only
- * ever instantiates one class from it, so taking the first non-nested, non-partial,
- * non-record, non-enum, non-interface declaration is both the simple rule and the correct
- * one for a file that exists to define a single view.
+ * The class declared is taken to be the view: the file is named after it and the tool only
+ * ever instantiates one class from it, so the first non-nested class declaration is both the
+ * simple rule and the correct one. It is usually `partial`, the layout half of a view whose
+ * logic half is the sibling `.cs`, and that is exactly the class to preview.
  */
 function readClassFromCSharp(file: string): string | undefined {
     let text: string;
@@ -560,197 +394,82 @@ function readClassFromCSharp(file: string): string | undefined {
         return undefined;
     }
 
-    // `partial` means another file supplies the rest, so this half may well hold no
-    // constructor and the class may not even be the one to instantiate. Refuse to guess.
-    if (/(?:^|\s)partial\s/.test(type[1])) {
-        return undefined;
-    }
-
     return ns ? `${ns}.${type[2]}` : type[2];
 }
 
 
 /**
- * Finds how to run the CLI.
+ * Finds how to run the `tuipreview` tool.
  *
- * Preference order: explicit setting, then a built binary, then `dotnet run`. The built
- * binary matters because previews are frequent and interactive — paying a full restore and
- * build on every right-click would make the extension feel broken, whereas `dotnet run`
- * after a successful build is incremental and quick.
+ * Preference order: explicit setting, then a build in the workspace, then `dotnet run` on the
+ * tool's project, then the copy bundled with the extension, then the dotnet tool on PATH.
+ *
+ * A workspace build wins over the bundled copy so that someone working on the tool previews
+ * with their own changes. Everyone else has no `cli/` in their workspace and gets the bundled
+ * copy, which needs no setup and always matches this version of the extension. The built
+ * binary matters because previews are frequent and interactive: paying a restore and build on
+ * every right-click would make the extension feel broken.
+ *
+ * The view's own project is never built. A `.tui.cs` depends on nothing but Terminal.Gui and
+ * TuiControls, which the tool ships itself.
  */
-function resolveLauncher(file: string): Launcher {
+function resolveLauncher(): Launcher {
     const cfg = vscode.workspace.getConfiguration("tuiLivePreview");
-    const launchMode = cfg.get<string>("launchMode", "auto");
-
-    // An app that hosts the preview itself compiles the view against exactly what it runs
-    // with, so in auto mode it wins over the CLI.
-    if (launchMode !== "cli") {
-        const owning = findOwningProject(file);
-        if (owning && isHostingApp(owning)) {
-            return { kind: "app", project: owning };
-        }
-        if (launchMode === "app") {
-            throw new Error(
-                owning
-                    ? `tuiLivePreview.launchMode is "app", but ${path.basename(owning)} is not an ` +
-                      `executable that references TuiPreview.Host.`
-                    : `tuiLivePreview.launchMode is "app", but no project was found above ` +
-                      `${path.basename(file)}.`
-            );
-        }
-    }
-
     const configured = cfg.get<string>("cliPath", "").trim();
 
     if (configured) {
         if (!fs.existsSync(configured)) {
             throw new Error(`tuiLivePreview.cliPath does not exist: ${configured}`);
         }
-        return configured.endsWith(".csproj")
-            ? { kind: "dotnet", project: configured }
-            : { kind: "exe", command: configured };
+        return launcherFor(configured);
     }
 
     for (const root of workspaceRoots()) {
         const built = findBuiltCli(root);
         if (built) {
-            return { kind: "exe", command: built };
+            return launcherFor(built);
         }
     }
 
     for (const root of workspaceRoots()) {
-        const project = path.join(root, "cli", "cli.csproj");
+        const project = path.join(root, "cli", "TuiPreview.Cli.csproj");
         if (fs.existsSync(project)) {
             return { kind: "dotnet", project };
         }
     }
 
-    throw new Error(
-        "Could not find the preview CLI. Set tuiLivePreview.cliPath to cli.exe or to cli.csproj."
-    );
+    // Published into tool/ by install-ext.ps1 before packaging, so it ships in the VSIX.
+    const bundled = extensionRoot && path.join(extensionRoot, "tool", "tuipreview.dll");
+    if (bundled && fs.existsSync(bundled)) {
+        return { kind: "dll", path: bundled };
+    }
+
+    // `dotnet tool install -g TuiPreview.Cli` puts it on PATH. If it is not there either, the
+    // terminal says so, which is clearer than anything we could guess at here.
+    return { kind: "exe", command: "tuipreview" };
+}
+
+/** A launcher for a path to the tool, by what kind of file it is. */
+function launcherFor(file: string): Launcher {
+    if (file.endsWith(".csproj")) {
+        return { kind: "dotnet", project: file };
+    }
+    // A dll is not executable by itself; it runs under the dotnet host.
+    if (file.endsWith(".dll")) {
+        return { kind: "dll", path: file };
+    }
+    return { kind: "exe", command: file };
 }
 
 function describeLauncher(launcher: Launcher): string {
     switch (launcher.kind) {
         case "exe":
             return launcher.command;
+        case "dll":
+            return `dotnet ${launcher.path}`;
         case "dotnet":
             return `dotnet run ${launcher.project}`;
-        case "app":
-            return `app ${launcher.project}`;
     }
-}
-
-/**
- * An executable that references TuiPreview.Host, directly or through a
- * Directory.Build.props (which only shows up in the restore output).
- */
-function isHostingApp(project: string): boolean {
-    let text: string;
-    try {
-        text = fs.readFileSync(project, "utf8");
-    } catch {
-        return false;
-    }
-
-    if (!/<OutputType>\s*(Exe|WinExe)\s*<\/OutputType>/i.test(text)) {
-        return false;
-    }
-    if (/TuiPreview\.Host/i.test(text)) {
-        return true;
-    }
-
-    try {
-        const assets = path.join(path.dirname(project), "obj", "project.assets.json");
-        return fs.readFileSync(assets, "utf8").includes('"TuiPreview.Host/');
-    } catch {
-        return false;
-    }
-}
-
-interface ProcessResult {
-    code: number;
-    output: string;
-}
-
-/** Runs a process to completion and never rejects. Replaceable, so tests need no real dotnet. */
-let runProcess = (command: string, args: string[], cwd: string): Promise<ProcessResult> =>
-    new Promise((resolve) => {
-        cp.execFile(
-            command,
-            args,
-            { cwd, windowsHide: true, maxBuffer: 16 * 1024 * 1024 },
-            (err, stdout, stderr) => {
-                // A number is the exit code; a string (ENOENT) means it never started.
-                const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
-                resolve({ code, output: `${stdout}${stderr}${err && typeof err.code !== "number" ? err.message : ""}` });
-            }
-        );
-    });
-
-/** Test seam: replaces how dotnet is run. */
-export function __setRunProcess(runner: typeof runProcess): void {
-    runProcess = runner;
-}
-
-/**
- * Builds the app and returns a shadow copy of its output to run.
- *
- * The build may fail, and that is expected: the view file is part of the app, so a view with a
- * compile error breaks the app's build too. The last successful build then still hosts the
- * preview, which compiles the view from source and shows its errors in the log.
- *
- * The copy keeps the app's bin folder unlocked, so it can be rebuilt or debugged while the
- * preview runs.
- */
-async function prepareApp(project: string): Promise<string> {
-    const name = path.basename(project);
-    const cwd = path.dirname(project);
-
-    const build = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `TUI Preview: building ${name}` },
-        () => runProcess("dotnet", ["build", project, "-nologo", "-v", "q"], cwd)
-    );
-    logLine(`dotnet build ${name}: exit ${build.code}${build.output.trim() ? `\n${build.output.trim()}` : ""}`);
-
-    const query = await runProcess("dotnet", ["msbuild", project, "-nologo", "-getProperty:TargetPath"], cwd);
-    const targetPath = query.output.trim();
-    if (query.code !== 0 || !targetPath || !fs.existsSync(targetPath)) {
-        throw new Error(
-            `${name} has no build output to host the preview` +
-            (build.code === 0 ? "" : ", and its build failed") +
-            ". See the TUI Preview log."
-        );
-    }
-
-    if (build.code !== 0) {
-        logLine(`${name} did not build; hosting the preview in its last successful build`);
-        vscode.window.setStatusBarMessage(`TUI Preview: ${name} did not build, using its last build`, 8000);
-    }
-
-    const hash = crypto.createHash("sha1").update(project).digest("hex").slice(0, 12);
-    const copy = path.join(os.tmpdir(), "tui-live-preview", `app-${hash}-${Date.now()}`);
-    fs.cpSync(path.dirname(targetPath), copy, { recursive: true });
-    logLine(`shadow copy of ${name}: ${copy}`);
-
-    return path.join(copy, path.basename(targetPath));
-}
-
-/** Deletes a terminal's shadow copy once its process has let go of the files. */
-function releaseAppCopy(terminal: vscode.Terminal): void {
-    const copy = appCopies.get(terminal);
-    if (!copy) {
-        return;
-    }
-    appCopies.delete(terminal);
-
-    setTimeout(() => {
-        try {
-            fs.rmSync(copy, { recursive: true, force: true });
-        } catch (err) {
-            logLine(`could not remove ${copy}: ${String(err)}`);
-        }
-    }, 2000);
 }
 
 function workspaceRoots(): string[] {
@@ -758,11 +477,11 @@ function workspaceRoots(): string[] {
 }
 
 /**
- * Looks for cli/bin/<config>/<tfm>/cli.exe.
+ * Looks for cli/bin/<config>/<tfm>/tuipreview.exe.
  *
- * Debug is preferred over Release because that is what someone iterating on the generator
- * wants, and the newest target framework first so a multi-targeted build does not resolve
- * to a stale output.
+ * Debug is preferred over Release because that is what someone iterating on the tool wants,
+ * and the newest target framework first so a multi-targeted build does not resolve to a stale
+ * output.
  */
 function findBuiltCli(root: string): string | undefined {
     const binRoot = path.join(root, "cli", "bin");
@@ -798,13 +517,13 @@ function findBuiltCli(root: string): string | undefined {
             const exe = path.join(
                 configDir,
                 tfm,
-                process.platform === "win32" ? "cli.exe" : "cli"
+                process.platform === "win32" ? "tuipreview.exe" : "tuipreview"
             );
             if (fs.existsSync(exe)) {
                 return exe;
             }
             // Framework-dependent deployments on non-Windows run the dll via its host.
-            const dll = path.join(configDir, tfm, "cli.dll");
+            const dll = path.join(configDir, tfm, "tuipreview.dll");
             if (fs.existsSync(dll)) {
                 return dll;
             }
@@ -827,57 +546,27 @@ function findBuiltCli(root: string): string | undefined {
 function commandLine(resolved: Resolved, extra: string[]): string {
     const quote = (value: string) => `"${value.replace(/"/g, '\\"')}"`;
 
-    if (resolved.launcher.kind === "app") {
-        if (!resolved.launcher.dll) {
-            throw new Error("This command is not available for an app that hosts the preview.");
-        }
-
-        // The running app is the project, so there is no --project.
-        return [
-            "dotnet",
-            quote(resolved.launcher.dll),
-            "--tui-preview",
-            "--view",
-            quote(resolved.previewPath),
-            "--class",
-            quote(resolved.className),
-            ...(resolved.previewPath === resolved.xaml
-                ? []
-                : ["--display-name", quote(resolved.xaml)]),
-            ...extra,
-        ].join(" ");
-    }
-
+    const launcher = resolved.launcher;
     const head =
-        resolved.launcher.kind === "exe"
-            ? [quote(resolved.launcher.command)]
-            : ["dotnet", "run", "--project", quote(resolved.launcher.project), "--"];
+        launcher.kind === "exe"
+            ? [quote(launcher.command)]
+            : launcher.kind === "dll"
+              ? ["dotnet", quote(launcher.path)]
+              : ["dotnet", "run", "--project", quote(launcher.project), "--"];
 
     return [
         ...head,
-        // --xaml or --view, depending on how the view is authored. The CLI rejects both at
-        // once, so the kind must be decided here rather than by passing both.
-        sourceFlagFor(resolved.kind),
-        // previewPath, not xaml: this is the scratch copy when the editor holds unsaved edits,
-        // and it is the only file the CLI can actually read.
+        "--view",
+        // previewPath, not view: this is the scratch copy when the editor holds unsaved edits,
+        // and it is the only file the tool can actually read.
         quote(resolved.previewPath),
-        // The CLI validates that this path exists and otherwise ignores it, so passing the
-        // project we were launched from is correct in both cases.
-        "--project",
-        quote(projectArgument(resolved)),
         "--class",
         quote(resolved.className),
-        // Only when the XAML we are compiling is a copy, i.e. when the sibling convention
-        // would look in the wrong directory. Passing it unconditionally is harmless but
-        // noisy in the log, and it would be wrong to imply the real file is always this one.
-        ...(resolved.codeBehind ? ["--code-behind", quote(resolved.codeBehind)] : []),
-        // Only when the compiled XAML is a scratch copy. The CLI uses this for the window
-        // title and to find the .previewrc, both of which must sit beside the real file -
-        // deriving them from the scratch path would put a content hash in the title and
-        // strand the saved log height in %TEMP%.
-        ...(resolved.previewPath === resolved.xaml
+        // Only when the compiled file is a scratch copy. The tool uses this for the window
+        // title, which must name the real file rather than one with a content hash in it.
+        ...(resolved.previewPath === resolved.view
             ? []
-            : ["--display-name", quote(resolved.xaml)]),
+            : ["--display-name", quote(resolved.view)]),
         ...extra,
     ].join(" ");
 }
@@ -888,21 +577,21 @@ function commandLine(resolved: Resolved, extra: string[]): string {
  * PowerShell and cmd.exe disagree about a line that starts with a quoted path, and there is
  * no single form both accept (verified against PowerShell 7.6 and cmd.exe):
  *
- *   cmd.exe      "C:\...\cli.exe" --xaml ...   works
- *   PowerShell   "C:\...\cli.exe" --xaml ...   ParserError: Unexpected token 'xaml'
+ *   cmd.exe      "C:\...\tuipreview.exe" --view ...   works
+ *   PowerShell   "C:\...\tuipreview.exe" --view ...   ParserError: Unexpected token 'view'
  *
  * PowerShell parses a leading quoted string as a string *expression*, so the arguments that
  * follow are a syntax error. Its call operator makes it a command invocation instead:
  *
- *   PowerShell   & "C:\...\cli.exe" --xaml ... works
- *   cmd.exe      & "C:\...\cli.exe" --xaml ... "& was unexpected at this time."
+ *   PowerShell   & "C:\...\tuipreview.exe" --view ... works
+ *   cmd.exe      & "C:\...\tuipreview.exe" --view ... "& was unexpected at this time."
  *
  * The `&` is a command separator in cmd.exe, which is why prefixing it unconditionally is
  * not a workaround — it trades one broken shell for the other. So the shell has to be
  * detected, and the call operator emitted only for PowerShell.
  *
- * Only the `exe` launcher needs this. `dotnet` is unquoted and resolves via PATH, so it
- * parses the same way in both.
+ * Only the `exe` launcher needs this. The others start with `dotnet`, which is unquoted and
+ * resolves via PATH, so it parses the same way in both.
  *
  * `vscode.env.shell` is the user's configured default profile, which is what a plain
  * `createTerminal` opens. An undefined value means VS Code could not determine it (common on
@@ -924,66 +613,11 @@ function commandPrefix(launcher: Launcher): string {
 }
 
 /**
- * The --project value: the project the previewed file belongs to.
- *
- * The CLI compiles the view against that project's references, NuGet packages and usings, so
- * it has to be the view's own project - passing the preview tool's cli.csproj for a user's view
- * would compile it against the wrong dependencies. Found the way `dotnet build` would find it:
- * the nearest directory above the file holding exactly one .csproj. A directory with several is
- * ambiguous and skipped rather than guessed at.
- *
- * Starts from the real file, never the scratch copy, which lives in a temp folder with no
- * project around it. Falls back to the tool's own cli.csproj - always a real path, because the
- * CLI rejects a --project that does not exist.
- */
-function projectArgument(resolved: Resolved): string {
-    const owning = findOwningProject(resolved.xaml);
-    if (owning) {
-        return owning;
-    }
-
-    if (resolved.launcher.kind === "dotnet") {
-        return resolved.launcher.project;
-    }
-
-    for (const root of workspaceRoots()) {
-        const project = path.join(root, "cli", "cli.csproj");
-        if (fs.existsSync(project)) {
-            return project;
-        }
-    }
-    return path.join(path.dirname(resolved.xaml), "cli.csproj");
-}
-
-/** The nearest single .csproj in the file's directory or any directory above it. */
-function findOwningProject(file: string): string | undefined {
-    let dir = path.dirname(file);
-    for (;;) {
-        let projects: string[] = [];
-        try {
-            projects = fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith(".csproj"));
-        } catch {
-            // Unreadable directory: keep walking, the way a missing one would.
-        }
-
-        if (projects.length === 1) {
-            return path.join(dir, projects[0]);
-        }
-
-        const parent = path.dirname(dir);
-        if (parent === dir) {
-            return undefined;
-        }
-        dir = parent;
-    }
-}
-
-/**
- * Returns the terminal for a (xaml, purpose) pair, creating it if needed.
+ * Returns the terminal for a view, creating it if needed.
  *
  * The env is applied only on creation, because that is the only time VS Code lets us set it.
  * Callers must therefore not rely on a changed setting taking effect on an existing
- * terminal; that is what the purpose in the key is for.
+ * terminal.
  */
 function openTerminal(
     key: string,
@@ -1008,7 +642,6 @@ function openTerminal(
                 if (terminals.get(key) === terminal) {
                     terminals.delete(key);
                 }
-                releaseAppCopy(terminal);
             }
         })
     );
@@ -1021,6 +654,7 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(log);
     logLine(`extension activated (build ${BUILD})`);
     logLine(`extension path: ${context.extensionPath}`);
+    extensionRoot = context.extensionPath;
 
     status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     status.text = `$(beaker) TUI ${BUILD}`;
@@ -1037,7 +671,7 @@ export function activate(context: vscode.ExtensionContext): void {
      * scratch file is enough to trigger a rebuild: the interactive host polls that file's
      * timestamp, so no IPC and no restart is needed.
      *
-     * Debounced, because a rebuild costs a full generate-compile-instantiate cycle and
+     * Debounced, because a rebuild costs a full compile-instantiate cycle and
      * `onDidChangeTextDocument` fires on every keystroke. Without this, typing a word would
      * queue ten rebuilds and the preview would lag behind the typing.
      */
@@ -1103,27 +737,6 @@ export function activate(context: vscode.ExtensionContext): void {
     register("tuiLivePreview.render", "render");
     register("tuiLivePreview.watch", "watch");
     register("tuiLivePreview.interactive", "interactive");
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand(
-            "tuiLivePreview.showGeneratedCode",
-            guard("tuiLivePreview.showGeneratedCode", async (picked) => {
-                const resolved = await resolve(picked);
-                // TUI_DUMP=1 is the existing --gen-test hook that prints the generated C#.
-                // Its own terminal, because env is fixed at creation and this one must not
-                // inherit TUI_ANSI from a normal preview of the same file.
-                const terminal = openTerminal(
-                    `${resolved.xaml}::generated`,
-                    "TUI Generated Code",
-                    { TUI_DUMP: "1" }
-                );
-                const command = commandPrefix(resolved.launcher) + commandLine(resolved, ["--gen-test"]);
-                logLine(`running: ${command}`);
-                terminal.sendText(command);
-                terminal.show(false);
-            })
-        )
-    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand("tuiLivePreview.showLog", () => showLog())

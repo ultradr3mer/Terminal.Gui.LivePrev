@@ -7,7 +7,7 @@ using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
-namespace TuiPreview.Host.Preview;
+namespace TuiPreview.Cli.Preview;
 
 /// <summary>
 /// Interactive live preview: a log pane on top, the real previewed view underneath.
@@ -31,10 +31,8 @@ internal sealed class PreviewBuilder
   /// <summary>
   /// How to produce the view under test.
   /// <para>
-  /// A delegate rather than a XAML path, so the host does not know or care where the view
-  /// comes from. The XAML path goes through the source generator; the C# path compiles a
-  /// plain class. Both arrive here as "give me a built view", which is all this window ever
-  /// needed from them.
+  /// A delegate rather than a path, so this window does not know or care how the view is
+  /// compiled. It arrives here as "give me a built view", which is all this window needs.
   /// </para>
   /// </summary>
   private readonly Func<RenderPipeline.BuildResult> _build;
@@ -103,10 +101,6 @@ internal sealed class PreviewBuilder
   }
 
   /// <summary>Re-reads the view source, rebuilds, and swaps the view in.</summary>
-  /// <remarks>
-  /// Delegates to <see cref="_build"/>, so this method is identical whether the view came
-  /// from a .tui.xaml through the source generator or from a plain .cs compiled on its own.
-  /// </remarks>
   public void Rebuild()
   {
     var sw = Stopwatch.StartNew();
@@ -131,9 +125,9 @@ internal sealed class PreviewBuilder
 
     if (!result.Success || result.Runnable is null)
     {
-      ShowFailure(result.HasNoGeneratedCode
-          ? "The generator produced no code."
-          : "Could not compile the generated code.");
+      // Also reached when the class compiled but is not a Terminal.Gui top-level, so the
+      // message points at the log rather than claiming a compile error.
+      ShowFailure("Could not build the view. The log above says why.");
       return;
     }
 
@@ -143,7 +137,7 @@ internal sealed class PreviewBuilder
 
   private void SwapView(IRunnable runnable)
   {
-    // View.Add only accepts a View, and every .tui.xaml root is a Window, so this always
+    // View.Add only accepts a View, and every Terminal.Gui top-level is one, so this always
     // succeeds in practice. Guard anyway rather than throwing inside a rebuild.
     if (runnable is not View view)
     {

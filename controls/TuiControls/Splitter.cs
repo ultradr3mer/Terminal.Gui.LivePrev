@@ -5,10 +5,10 @@ using Terminal.Gui.Text;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
-namespace TuiPreview.Host.Controls;
+namespace TuiControls;
 
 /// <summary>Welche Hälfte eines <see cref="Splitter"/> gemeint ist.</summary>
-internal enum SplitterPane
+public enum SplitterPane
 {
     /// <summary>Links (<see cref="Orientation.Horizontal"/>) bzw. oben (<see cref="Orientation.Vertical"/>).</summary>
     First,
@@ -40,7 +40,7 @@ internal enum SplitterPane
 /// aufklappt. Ohne Erlaubnis behält jede Hälfte mindestens eine Zeile bzw. Spalte.
 /// </para>
 /// </remarks>
-internal class Splitter : View
+public class Splitter : View
 {
     /// <summary>Dicke der Trennlinie (Rand der festen Hälfte).</summary>
     private const int DividerSize = 1;

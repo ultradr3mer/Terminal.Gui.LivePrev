@@ -2,7 +2,7 @@
 using System.Collections.Generic;
 using System.Text;
 
-namespace TuiPreview.Host.Preview
+namespace TuiPreview.Cli.Preview
 {
   using Microsoft.CodeAnalysis;
   using System.Globalization;

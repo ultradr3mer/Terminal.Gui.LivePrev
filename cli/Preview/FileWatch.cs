@@ -1,4 +1,4 @@
-namespace TuiPreview.Host.Preview;
+namespace TuiPreview.Cli.Preview;
 
 internal sealed class PollingFileWatch : IDisposable
 {
