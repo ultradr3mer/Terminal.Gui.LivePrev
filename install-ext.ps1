@@ -34,6 +34,11 @@
 .PARAMETER Feed
     Where -Pack puts the packages. Defaults to .\nupkg.
 
+.PARAMETER CodeProfile
+    The VS Code profile to install into. Defaults to the profile this repo's workspace is
+    associated with, because `code --install-extension` otherwise installs into the default
+    profile, which a window running another profile never sees.
+
 .EXAMPLE
     .\install-ext.ps1
 
@@ -46,7 +51,8 @@ param(
     [switch] $SkipTests,
     [switch] $SkipBuild,
     [switch] $Pack,
-    [string] $Feed
+    [string] $Feed,
+    [string] $CodeProfile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,6 +74,25 @@ function Write-Step([string] $message) {
 function Fail([string] $message) {
     Write-Host "FAILED: $message" -ForegroundColor Red
     exit 1
+}
+
+# VS Code records which profile a workspace opens in, keyed by the folder URI
+# (file:///f%3A/source/...). Returns the profile name, or $null for the default profile.
+function Get-WorkspaceProfile([string] $folder) {
+    $storage = Join-Path $env:APPDATA 'Code\User\globalStorage\storage.json'
+    if (-not (Test-Path $storage)) { return $null }
+    $state = Get-Content $storage -Raw | ConvertFrom-Json
+
+    $segments = $folder.TrimEnd('\') -split '\\'
+    $drive = $segments[0].TrimEnd(':').ToLowerInvariant()
+    $rest = ($segments | Select-Object -Skip 1 | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
+    $uri = "file:///$drive%3A/$rest"
+
+    $location = $state.profileAssociations.workspaces.PSObject.Properties |
+        Where-Object { $_.Name -ieq $uri } |
+        Select-Object -First 1 -ExpandProperty Value
+    if (-not $location -or $location -eq '__default__profile__') { return $null }
+    return ($state.userDataProfiles | Where-Object location -eq $location | Select-Object -First 1).name
 }
 
 # --- 1. the tool, TuiControls and the sample app ---
@@ -152,13 +177,17 @@ try {
     $vsix = Get-ChildItem *.vsix | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $vsix) { Fail 'no .vsix was produced' }
 
-    Write-Step "installing $($vsix.Name)"
-    & code --install-extension $vsix.FullName --force
+    if (-not $CodeProfile) { $CodeProfile = Get-WorkspaceProfile $root }
+    $profileArgs = if ($CodeProfile) { @('--profile', $CodeProfile) } else { @() }
+    $profileLabel = if ($CodeProfile) { "profile '$CodeProfile'" } else { 'the default profile' }
+
+    Write-Step "installing $($vsix.Name) into $profileLabel"
+    & code --install-extension $vsix.FullName --force @profileArgs
     if ($LASTEXITCODE -ne 0) { Fail 'code --install-extension failed' }
 
     $id = 'clara.tui-live-preview'
-    if (-not (& code --list-extensions | Select-String -SimpleMatch $id)) {
-        Fail "$id is not in the extension list after installing"
+    if (-not (& code --list-extensions @profileArgs | Select-String -SimpleMatch $id)) {
+        Fail "$id is not in the extension list of $profileLabel after installing"
     }
 
     # Prove the file that will actually run is the one just built. A silently stale install
@@ -175,6 +204,7 @@ try {
     Write-Host ''
     Write-Host 'Installed:' -ForegroundColor Green
     Write-Host "  vsix      $($vsix.FullName)"
+    Write-Host "  profile   $profileLabel"
     Write-Host "  deployed  $deployedJs"
 
     if ($deployedId -ne $buildId) {

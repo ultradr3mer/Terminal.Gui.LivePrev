@@ -670,21 +670,14 @@ function testWhenClauses() {
         }
     });
 
-    h.test("every menu command is declared and has an activation event", () => {
+    // Since VS Code 1.74 a command declared in contributes.commands activates the extension
+    // by itself, so declaring it is what makes a menu entry work.
+    h.test("every menu command is declared", () => {
         const declared = new Set(manifest.contributes.commands.map((c) => c.command));
-        const events = new Set(
-            manifest.activationEvents
-                .filter((e) => e.startsWith("onCommand:"))
-                .map((e) => e.slice("onCommand:".length))
-        );
 
         for (const [menu, items] of Object.entries(menus)) {
             for (const item of items) {
                 h.assert.ok(declared.has(item.command), `${menu}: ${item.command} not declared`);
-                h.assert.ok(
-                    events.has(item.command),
-                    `${menu}: ${item.command} has no onCommand activation event`
-                );
             }
         }
     });

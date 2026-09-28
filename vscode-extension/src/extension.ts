@@ -59,7 +59,7 @@ function logLine(message: string): void {
  * Surfaced in the status bar and the log so "command not found" is never a mystery: a
  * stale host runs old code while VS Code shows the new menu entries from package.json.
  */
-const BUILD = "2026-09-28.3";
+const BUILD = "2026-09-28.4";
 
 /** Shows which build is live, so a stale Extension Development Host is immediately visible. */
 let status: vscode.StatusBarItem | undefined;

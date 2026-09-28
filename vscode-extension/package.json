@@ -18,13 +18,7 @@
     "preview"
   ],
   "main": "./out/extension.js",
-  "activationEvents": [
-    "onCommand:tuiLivePreview.render",
-    "onCommand:tuiLivePreview.watch",
-    "onCommand:tuiLivePreview.interactive",
-    "onCommand:tuiLivePreview.stopAll",
-    "onCommand:tuiLivePreview.showLog"
-  ],
+  "activationEvents": [],
   "contributes": {
     "commands": [
       {
