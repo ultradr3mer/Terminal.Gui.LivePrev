@@ -91,7 +91,7 @@ internal sealed class PreviewBuilder
     Chrome.RebuildRequested += Rebuild;
     Chrome.QuitRequested += () => Chrome.RequestStop();
 
-    Chrome.AppendLog($"Edit {Path.GetFileName(_displayName)} and save to see changes.");
+    Chrome.AppendLog($"Edit {Path.GetFileName(_displayName)} and save to see changes.", LogKind.Meta);
   }
 
   /// <summary>Test seam: render the whole interactive window (log + view) to a string.</summary>
@@ -141,7 +141,7 @@ internal sealed class PreviewBuilder
     }
 
     SwapView(result.Runnable);
-    Chrome.AppendLog($"> render completed in {sw.ElapsedMilliseconds} ms");
+    Chrome.AppendLog($"> render completed in {sw.ElapsedMilliseconds} ms", LogKind.Success);
   }
 
   private void SwapView(IRunnable runnable)

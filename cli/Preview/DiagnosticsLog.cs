@@ -1,10 +1,39 @@
-﻿using Microsoft.CodeAnalysis;
-using System;
-using System.Collections.Generic;
-using System.Text;
+using Microsoft.CodeAnalysis;
+using Terminal.Gui.Text;
 
 namespace TuiPreview.Cli.Preview
 {
+  /// <summary>What a log line is, which decides its colour.</summary>
+  internal enum LogKind
+  {
+    Normal,
+    Meta,
+    Success,
+    Error,
+    Warning,
+    Info,
+  }
+
+  /// <summary>
+  /// A file position within a log line. <see cref="Start"/> and <see cref="Length"/> count
+  /// chars; <see cref="Columns"/> converts them for matching a mouse position.
+  /// </summary>
+  internal sealed record LogLink(int Start, int Length, string Path, int Line, int Column)
+  {
+    /// <summary>The terminal columns the link covers in <paramref name="text"/>, end exclusive.</summary>
+    public (int Start, int End) Columns(string text)
+    {
+      int start = text[..Start].GetColumns();
+      return (start, start + text.Substring(Start, Length).GetColumns());
+    }
+  }
+
+  /// <summary>
+  /// One log line. <see cref="TagLength"/> is how many leading chars (the severity tag and the
+  /// diagnostic ID) take the colour of <see cref="Kind"/>; 0 colours the whole line.
+  /// </summary>
+  internal sealed record LogLine(string Text, LogKind Kind, int TagLength = 0, LogLink? Link = null);
+
   internal class DiagnosticsLog
   {
     public DiagnosticsLog()
@@ -22,14 +51,13 @@ namespace TuiPreview.Cli.Preview
     /// </summary>
     public Func<string, string> MapSourcePath { get; set; } = path => path;
 
-    /// <summary>
-    /// The log as Markdown: one tight list, one item per line. Items are the only blocks that
-    /// follow each other without a blank line. Paragraphs need one to stay apart, and the
-    /// Markdown view renders it as an empty row.
-    /// </summary>
+    /// <summary>The lines in display order, for colouring them and for finding links.</summary>
+    public IReadOnlyList<LogLine> Lines => _logLines;
+
+    /// <summary>The log as plain text, one row per line.</summary>
     public string GetFullLog()
     {
-      return string.Join("\n", _logLines);
+      return string.Join("\n", _logLines.Select(l => l.Text));
     }
 
     public string GetDiagnosticsSummary(int maxLength = 40)
@@ -69,7 +97,7 @@ namespace TuiPreview.Cli.Preview
       }
     }
 
-    private readonly List<string> _logLines = [];
+    private readonly List<LogLine> _logLines = [];
     private int _logSegmentLineCount;
     private Dictionary<DiagnosticSeverity, int> _logSegmentDiagnosticsCount;
     private const int MaxLogLines = 200;
@@ -78,32 +106,47 @@ namespace TuiPreview.Cli.Preview
     private int _logSegmentI;
 
     /// <summary>
-    /// Appends a diagnostic. Its location becomes a link that opens the file at that position
-    /// in VS Code.
+    /// Appends a diagnostic. Its location is recorded as a link that opens the file at that
+    /// position in VS Code.
     /// </summary>
     public void AppendLog(Diagnostic d)
     {
-      string where = d.Location.SourceTree is null ? string.Empty : FormatLocation(d.Location) + ": ";
+      string tag = $"[{d.Severity}] {d.Id}:";
+      string text = tag + " ";
+      LogLink? link = null;
 
-      // Marked up only when it needs attention, so errors stand out in a long run of info
-      // lines. LogHighlighter turns strong into red and emphasis into yellow.
-      string severity = Escape($"[{d.Severity}]");
-      severity = d.Severity switch
+      if (d.Location.SourceTree is not null)
       {
-        DiagnosticSeverity.Error => $"**{severity}**",
-        DiagnosticSeverity.Warning => $"*{severity}*",
-        _ => severity,
+        FileLinePositionSpan span = d.Location.GetLineSpan();
+        int line = span.StartLinePosition.Line + 1;
+        int column = span.StartLinePosition.Character + 1;
+        string path = MapSourcePath(span.Path);
+        string where = $"{Path.GetFileName(path)}({line},{column})";
+
+        // Generated trees, such as the constructor stub, have a name but no file to open.
+        if (Path.IsPathRooted(path) && File.Exists(path))
+        {
+          link = new LogLink(text.Length, where.Length, path, line, column);
+        }
+
+        text += where + ": ";
+      }
+
+      LogKind kind = d.Severity switch
+      {
+        DiagnosticSeverity.Error => LogKind.Error,
+        DiagnosticSeverity.Warning => LogKind.Warning,
+        _ => LogKind.Info,
       };
 
       _logSegmentDiagnosticsCount[d.Severity]++;
-      // Nested under the line before it, which is the rebuild the diagnostic belongs to.
-      AppendMarkdown($"{severity} {Escape(d.Id)}: {where}{Escape(d.GetMessage())}");
+      Append(new LogLine(text + d.GetMessage(), kind, tag.Length, link));
     }
 
-    /// <summary>Appends one plain-text line, shown as written rather than read as Markdown.</summary>
-    public void AppendLog(string line)
+    /// <summary>Appends one line, coloured as a whole by <paramref name="kind"/>.</summary>
+    public void AppendLog(string line, LogKind kind = LogKind.Normal)
     {
-      AppendMarkdown(Escape(line));
+      Append(new LogLine(line, kind));
     }
 
     /// <summary>
@@ -115,52 +158,18 @@ namespace TuiPreview.Cli.Preview
             ? "vscode-insiders"
             : "vscode";
 
-    private string FormatLocation(Location location)
+    /// <summary>The <c>vscode://file/…:line:column</c> URL that opens <paramref name="link"/>.</summary>
+    public static string EditorUrl(LogLink link)
     {
-      FileLinePositionSpan span = location.GetLineSpan();
-      int line = span.StartLinePosition.Line + 1;
-      int column = span.StartLinePosition.Character + 1;
-      string path = MapSourcePath(span.Path);
-      string text = Escape($"{Path.GetFileName(path)}({line},{column})");
-
-      // Generated trees, such as the constructor stub, have a name but no file to open.
-      if (!Path.IsPathRooted(path) || !File.Exists(path))
-      {
-        return text;
-      }
-
-      // Only the characters that would end the link destination or change its meaning are
-      // encoded. VS Code decodes them again, and the drive colon has to stay as it is.
-      string encoded = path.Replace('\\', '/')
-          .Replace("%", "%25").Replace(" ", "%20").Replace("#", "%23").Replace("?", "%3F")
-          .Replace("(", "%28").Replace(")", "%29").Replace("<", "%3C").Replace(">", "%3E");
+      // Only the characters that would change the URL's meaning are encoded. VS Code decodes
+      // them again, and the drive colon has to stay as it is.
+      string encoded = link.Path.Replace('\\', '/')
+          .Replace("%", "%25").Replace(" ", "%20").Replace("#", "%23").Replace("?", "%3F");
       string slash = encoded.StartsWith('/') ? string.Empty : "/";
-      return $"[{text}]({EditorScheme}://file{slash}{encoded}:{line}:{column})";
+      return $"{EditorScheme}://file{slash}{encoded}:{link.Line}:{link.Column}";
     }
 
-    /// <summary>
-    /// Backslash-escapes ASCII punctuation, which CommonMark allows for every such character.
-    /// Compiler messages are full of it, and a generic like <c>List&lt;T&gt;</c> would otherwise be
-    /// read as an HTML tag and dropped.
-    /// </summary>
-    private static string Escape(string text)
-    {
-      var sb = new StringBuilder(text.Length + 8);
-      foreach (char c in text)
-      {
-        if (char.IsAsciiLetterOrDigit(c) || c == ' ' || !char.IsAscii(c) || char.IsControl(c))
-        {
-          sb.Append(c);
-        }
-        else
-        {
-          sb.Append('\\').Append(c);
-        }
-      }
-      return sb.ToString();
-    }
-
-    private void AppendMarkdown(string line)
+    private void Append(LogLine line)
     {
       _logLines.Add(line);
       _logSegmentLineCount++;
@@ -170,7 +179,7 @@ namespace TuiPreview.Cli.Preview
         _logLines.RemoveRange(0, _logLines.Count - MaxLogLines);
       }
 
-      AppendCompleted?.Invoke(line);
+      AppendCompleted?.Invoke(line.Text);
 
       _lastLogTime = DateTime.UtcNow;
     }
@@ -186,7 +195,7 @@ namespace TuiPreview.Cli.Preview
         {DiagnosticSeverity.Info, 0},
         {DiagnosticSeverity.Hidden, 0},
       };
-      AppendLog($"> Run start {DateTime.Now:HH:mm:ss}"); 
+      AppendLog($"> Run start {DateTime.Now:HH:mm:ss}", LogKind.Meta);
 
       // Reset after the header, so the header itself does not count as a new entry.
       _logSegmentLineCount = 0;

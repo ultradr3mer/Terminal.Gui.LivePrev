@@ -47,18 +47,22 @@ internal sealed partial class PreviewChrome : Runnable
   // A Runnable has no border to draw its title on.
   private readonly Label _titleLabel = new() { CanFocus = false };
 
-  // Markdown rather than a TextView, so a diagnostic's file position can be a clickable link.
-  // Clicks reach it without focus, and staying unfocusable keeps the keys for the preview.
-  private readonly Markdown _log = new()
+  // Code rather than a TextView: one row per line, each part coloured by a highlighter. It has
+  // no links of its own; the logic half makes file positions clickable from mouse events,
+  // which need no focus. Staying unfocusable keeps the keys for the preview.
+  private readonly Code _log = new()
   {
     X = 0,
     Y = Pos.Align(Alignment.Start),
     Width = Dim.Fill(),
-    Height = Dim.Fill(),
+    Height = Dim.Fill(), 
     CanFocus = false,
-    ShowCopyButtons = false,
+    // Plain mouse moves as well as clicks, for highlighting the link under the mouse.
+    MousePositionTracking = true,
+    // Without a language, Code ignores its highlighter.
+    Language = "log",
     BorderStyle = LineStyle.None,
-    ViewportSettings = ViewportSettingsFlags.HasVerticalScrollBar,
+    ViewportSettings = ViewportSettingsFlags.HasVerticalScrollBar | ViewportSettingsFlags.HasHorizontalScrollBar,
   };
 
   public View LogPane { get; } = new()
@@ -113,6 +117,7 @@ internal sealed partial class PreviewChrome : Runnable
     ViewportSettings = ViewportSettingsFlags.Transparent;
 
     _log.VerticalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
+    _log.HorizontalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
 
     LogPane.Add(_toolbarRow, _log);
     Splitter.First.Add(LogPane);

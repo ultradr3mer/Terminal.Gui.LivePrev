@@ -1,4 +1,5 @@
 using Microsoft.CodeAnalysis;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
@@ -14,6 +15,7 @@ internal sealed partial class PreviewChrome
 {
   private readonly DiagnosticsLog _logWriter;
   private bool _logAutoCollapse = true;
+  private readonly LogHighlighter _logHighlighter;
   private bool _scrollLogToEnd;
 
   public PreviewChrome()
@@ -27,6 +29,7 @@ internal sealed partial class PreviewChrome
     {
       AppendCompleted = OnLogAppendComplete
     };
+    _logHighlighter = new LogHighlighter(_logWriter, () => _log.GetAttributeForRole(VisualRole.Normal));
 
     WireInput();
     WireLog();
@@ -53,10 +56,12 @@ internal sealed partial class PreviewChrome
 
   private void OnLogAppendComplete(string line)
   {
+    // The hovered line index would point at another line once old ones are dropped.
+    _logHighlighter.HoveredLine = null;
     _log.Text = _logWriter.GetFullLog();
 
-    // Markdown lays out new text on the next layout pass and scrolls back to the top when it
-    // does, so the scroll to the newest line has to wait for that pass.
+    // Before the first layout the viewport has no height yet, so the scroll to the newest
+    // line waits for the next layout pass.
     _scrollLogToEnd = true;
     _log.SetNeedsLayout();
 
@@ -67,7 +72,18 @@ internal sealed partial class PreviewChrome
   {
     // Set here, not in the layout half: a previewed .tui.cs may only use the framework,
     // Terminal.Gui and TuiControls, and the highlighter is part of the tool.
-    _log.SyntaxHighlighter = new LogHighlighter();
+    _log.SyntaxHighlighter = _logHighlighter;
+
+    // Code clears its viewport with the code background. The log should look like the rest
+    // of the chrome, and the highlighter uses the Normal background for the text as well.
+    _log.GettingAttributeForRole += (_, e) =>
+    {
+      if (e.Role == VisualRole.Code)
+      {
+        e.Result = _log.GetAttributeForRole(VisualRole.Normal);
+        e.Handled = true;
+      }
+    };
 
     _log.SubViewsLaidOut += (_, _) =>
     {
@@ -81,9 +97,61 @@ internal sealed partial class PreviewChrome
       _log.Viewport = _log.Viewport with { Y = bottom };
     };
 
+    _log.MouseEvent += (_, mouse) =>
+    {
+      if (mouse.Position is not { } pos)
+      {
+        return;
+      }
+
+      int index = _log.Viewport.Y + pos.Y;
+      LogLink? link = LinkAt(index, _log.Viewport.X + pos.X);
+
+      if (mouse.Flags.HasFlag(MouseFlags.LeftButtonClicked) && link is not null)
+      {
+        Link.OpenUrl(DiagnosticsLog.EditorUrl(link));
+        mouse.Handled = true;
+        return;
+      }
+
+      if (mouse.Flags.HasFlag(MouseFlags.PositionReport))
+      {
+        SetHoveredLine(link is null ? null : index);
+      }
+    };
+
+    _log.MouseLeave += (_, _) => SetHoveredLine(null);
+
     // Link.OpenUrl refuses every scheme outside this list. The log is the only content that
     // makes editor links, and it makes them only for files that exist.
     Link.SafeSchemes.Add(DiagnosticsLog.EditorScheme);
+  }
+
+  /// <summary>The link at a content position of the log, if there is one.</summary>
+  private LogLink? LinkAt(int index, int column)
+  {
+    if (index < 0 || index >= _logWriter.Lines.Count || _logWriter.Lines[index] is not { Link: { } link } line)
+    {
+      return null;
+    }
+
+    (int start, int end) = link.Columns(line.Text);
+    return column >= start && column < end ? link : null;
+  }
+
+  private void SetHoveredLine(int? index)
+  {
+    if (_logHighlighter.HoveredLine == index)
+    {
+      return;
+    }
+
+    _logHighlighter.HoveredLine = index;
+
+    // Code highlights only when its text, language or highlighter changes. Setting the same
+    // highlighter again would be ignored, so it is removed and put back.
+    _log.SyntaxHighlighter = null;
+    _log.SyntaxHighlighter = _logHighlighter;
   }
 
   private void WireInput()
@@ -107,9 +175,9 @@ internal sealed partial class PreviewChrome
     });
   }
 
-  internal void AppendLog(string v)
+  internal void AppendLog(string v, LogKind kind = LogKind.Normal)
   {
-    _logWriter.AppendLog(v);
+    _logWriter.AppendLog(v, kind);
   }
 
   internal void AppendLog(Diagnostic d)
