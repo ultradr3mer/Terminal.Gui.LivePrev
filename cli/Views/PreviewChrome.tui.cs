@@ -21,7 +21,7 @@ internal sealed partial class PreviewChrome : Runnable
   public const string DefaultPreviewPlaceholderText =
       "No view hosted yet.\n\nThe previewed view appears here.";
 
-  private const int ToolbarHeight = 1;
+  private const int ToolbarHeight = 1; 
 
   // Clickable because VS Code's terminal does not deliver every key.
   public readonly Shortcut RebuildButton = new() { Title = "⟳ Rebuild", Key = Key.F5 };
@@ -47,22 +47,19 @@ internal sealed partial class PreviewChrome : Runnable
   // A Runnable has no border to draw its title on.
   private readonly Label _titleLabel = new() { CanFocus = false };
 
-  // TextView is obsolete in favour of Terminal.Gui.Editor, which is overkill for a read-only log.
-#pragma warning disable CS0618
-  private readonly TextView _log = new()
+  // Markdown rather than a TextView, so a diagnostic's file position can be a clickable link.
+  // Clicks reach it without focus, and staying unfocusable keeps the keys for the preview.
+  private readonly Markdown _log = new()
   {
     X = 0,
     Y = Pos.Align(Alignment.Start),
     Width = Dim.Fill(),
     Height = Dim.Fill(),
-    ReadOnly = true,
-    // Without wrap, MoveEnd scrolls sideways and clips the start of every line.
-    WordWrap = true,
     CanFocus = false,
+    ShowCopyButtons = false,
     BorderStyle = LineStyle.None,
     ViewportSettings = ViewportSettingsFlags.HasVerticalScrollBar,
   };
-#pragma warning restore CS0618
 
   public View LogPane { get; } = new()
   {

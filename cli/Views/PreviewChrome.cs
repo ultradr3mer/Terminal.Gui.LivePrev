@@ -14,6 +14,7 @@ internal sealed partial class PreviewChrome
 {
   private readonly DiagnosticsLog _logWriter;
   private bool _logAutoCollapse = true;
+  private bool _scrollLogToEnd;
 
   public PreviewChrome()
   {
@@ -28,6 +29,7 @@ internal sealed partial class PreviewChrome
     };
 
     WireInput();
+    WireLog();
 
     // The builder sets Title after construction.
     TitleChanged += (_, _) => _titleLabel.Text = Title;
@@ -39,20 +41,49 @@ internal sealed partial class PreviewChrome
 
   public event Action? QuitRequested;
 
+  /// <summary>
+  /// Maps the path a diagnostic reports to the file its link opens. See
+  /// <see cref="DiagnosticsLog.MapSourcePath"/>.
+  /// </summary>
+  internal Func<string, string> MapSourcePath
+  {
+    get => _logWriter.MapSourcePath;
+    set => _logWriter.MapSourcePath = value;
+  }
+
   private void OnLogAppendComplete(string line)
   {
     _log.Text = _logWriter.GetFullLog();
 
-    try
-    {
-      _log.MoveEnd();
-    }
-    catch (InvalidOperationException)
-    {
-      // Layout has not run yet; the first draw positions it.
-    }
+    // Markdown lays out new text on the next layout pass and scrolls back to the top when it
+    // does, so the scroll to the newest line has to wait for that pass.
+    _scrollLogToEnd = true;
+    _log.SetNeedsLayout();
 
     UpdateStatus();
+  }
+
+  private void WireLog()
+  {
+    // Set here, not in the layout half: a previewed .tui.cs may only use the framework,
+    // Terminal.Gui and TuiControls, and the highlighter is part of the tool.
+    _log.SyntaxHighlighter = new LogHighlighter();
+
+    _log.SubViewsLaidOut += (_, _) =>
+    {
+      if (!_scrollLogToEnd)
+      {
+        return;
+      }
+
+      _scrollLogToEnd = false;
+      int bottom = Math.Max(0, _log.GetContentSize().Height - _log.Viewport.Height);
+      _log.Viewport = _log.Viewport with { Y = bottom };
+    };
+
+    // Link.OpenUrl refuses every scheme outside this list. The log is the only content that
+    // makes editor links, and it makes them only for files that exist.
+    Link.SafeSchemes.Add(DiagnosticsLog.EditorScheme);
   }
 
   private void WireInput()

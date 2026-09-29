@@ -19,7 +19,7 @@ internal static class InteractiveSession
     public static int Run(string displayName, string watchedPath,
         Func<RenderPipeline.BuildResult> build)
     {
-        var builder = new PreviewBuilder(displayName, build);
+        var builder = new PreviewBuilder(displayName, watchedPath, build);
         var runnable = builder.Chrome;
 
         using IApplication app = Application.Create();
@@ -46,7 +46,7 @@ internal static class InteractiveSession
         int lastMinute = -1;
         app.AddTimeout(FilePollInterval, () =>
         {
-            string? current = ReadStamp(watchedPath);
+            string current = ReadStamp(watchedPath);
             if (current != lastSeen)
             {
                 lastSeen = current;

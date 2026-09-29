@@ -91,7 +91,7 @@ internal static class PreviewRunner
 
     if (options.UiSnapshot)
     {
-      var ui = new PreviewBuilder(displayName, build);
+      var ui = new PreviewBuilder(displayName, source, build);
       ui.Rebuild();
 
       for (int i = 1; i <= options.UiFlood; i++)

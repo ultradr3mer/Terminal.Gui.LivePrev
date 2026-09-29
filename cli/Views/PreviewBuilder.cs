@@ -67,10 +67,19 @@ internal sealed class PreviewBuilder
 
   private View? _current;
 
-  public PreviewBuilder(string displayName, Func<RenderPipeline.BuildResult> build)
+  /// <param name="compiledPath">
+  /// The file the build actually reads. Diagnostics report this path, and their links are
+  /// pointed back at <paramref name="displayName"/> when it is a scratch copy.
+  /// </param>
+  public PreviewBuilder(string displayName, string compiledPath, Func<RenderPipeline.BuildResult> build)
   {
     _displayName = displayName;
     _build = build;
+
+    // The scratch copy is a verbatim mirror of the buffer, so its line numbers hold for the
+    // real file too.
+    Chrome.MapSourcePath = path =>
+        string.Equals(path, compiledPath, StringComparison.OrdinalIgnoreCase) ? displayName : path;
 
     // The chrome names the view it previews. _displayName is the file the user recognises,
     // which is not necessarily the one compiled: an editor mirrors an unsaved buffer to a
@@ -132,7 +141,7 @@ internal sealed class PreviewBuilder
     }
 
     SwapView(result.Runnable);
-    Chrome.AppendLog($"render in {sw.ElapsedMilliseconds} ms");
+    Chrome.AppendLog($"> render completed in {sw.ElapsedMilliseconds} ms");
   }
 
   private void SwapView(IRunnable runnable)

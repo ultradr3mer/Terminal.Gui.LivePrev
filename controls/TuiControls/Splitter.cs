@@ -54,8 +54,10 @@ public class Splitter : View
     private SplitterPane? collapsed;
 
     /// <summary>
-    /// Eingeklappt, während die Maus noch zog: Das Loslassen landet auf dem gerade
-    /// erschienenen Button und würde als Klick sofort wieder aufklappen.
+    /// Eingeklappt, ohne dass die Maus auf dem Button gedrückt wurde: Das Loslassen bzw. der
+    /// Klick der auslösenden Geste (Ziehen der Trennlinie, ein Klick auf „Log ausblenden“ an
+    /// derselben Stelle) landet auf dem gerade erschienenen Button und würde sofort wieder
+    /// aufklappen.
     /// </summary>
     private bool ignoreDragRelease;
 
@@ -77,7 +79,8 @@ public class Splitter : View
         expandButton.Accepted += (_, _) => Expand();
         expandButton.Accepting += (_, e) =>
         {
-            if (ignoreDragRelease)
+            // Nur Maus: Tastatur gehört zu keiner Geste, die gerade eingeklappt hat.
+            if (ignoreDragRelease && e.Context?.Binding is MouseBinding)
             {
                 ignoreDragRelease = false;
                 e.Handled = true;
@@ -195,6 +198,7 @@ public class Splitter : View
         }
 
         collapsed = pane;
+        ignoreDragRelease = true;
         ApplyLayout();
         CollapsedChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -265,14 +269,12 @@ public class Splitter : View
         var fillCollapsible = fixedPane == SplitterPane.First ? canCollapseSecond : canCollapseFirst;
         if (dragged && size <= DividerSize && fixedCollapsible)
         {
-            ignoreDragRelease = IsDragging(fix);
             Collapse(fixedPane);
             return;
         }
 
         if (dragged && size >= total && fillCollapsible)
         {
-            ignoreDragRelease = IsDragging(fix);
             Collapse(fixedPane == SplitterPane.First ? SplitterPane.Second : SplitterPane.First);
             return;
         }
