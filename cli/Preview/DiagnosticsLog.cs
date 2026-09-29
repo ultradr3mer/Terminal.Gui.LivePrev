@@ -1,5 +1,4 @@
-using Microsoft.CodeAnalysis;
-using Terminal.Gui.Text;
+﻿using Microsoft.CodeAnalysis;
 
 namespace TuiPreview.Cli.Preview
 {
@@ -16,16 +15,11 @@ namespace TuiPreview.Cli.Preview
 
   /// <summary>
   /// A file position within a log line. <see cref="Start"/> and <see cref="Length"/> count
-  /// chars; <see cref="Columns"/> converts them for matching a mouse position.
+  /// chars; <see cref="LogRow.CharAt"/> maps a mouse position to a char.
   /// </summary>
   internal sealed record LogLink(int Start, int Length, string Path, int Line, int Column)
   {
-    /// <summary>The terminal columns the link covers in <paramref name="text"/>, end exclusive.</summary>
-    public (int Start, int End) Columns(string text)
-    {
-      int start = text[..Start].GetColumns();
-      return (start, start + text.Substring(Start, Length).GetColumns());
-    }
+    public bool Contains(int index) => index >= Start && index < Start + Length;
   }
 
   /// <summary>

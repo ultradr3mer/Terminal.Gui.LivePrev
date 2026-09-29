@@ -18,6 +18,14 @@ internal sealed partial class PreviewChrome
   private readonly LogHighlighter _logHighlighter;
   private bool _scrollLogToEnd;
 
+  // The display rows of the log, wrapped to _wrapWidth.
+  private List<LogRow> _logRows = [];
+  private int _wrapWidth = -1;
+
+  // The row a press in the log started on, and whether the mouse has left it since.
+  private int? _selectAnchor;
+  private bool _selectDragged;
+
   public PreviewChrome()
   {
     InitializeComponent();
@@ -56,9 +64,11 @@ internal sealed partial class PreviewChrome
 
   private void OnLogAppendComplete(string line)
   {
-    // The hovered line index would point at another line once old ones are dropped.
+    // Line indexes would point at other lines once old ones are dropped.
     _logHighlighter.HoveredLine = null;
-    _log.Text = _logWriter.GetFullLog();
+    _logHighlighter.Selection = null;
+    _selectAnchor = null;
+    RewrapLog();
 
     // Before the first layout the viewport has no height yet, so the scroll to the newest
     // line waits for the next layout pass.
@@ -87,6 +97,14 @@ internal sealed partial class PreviewChrome
 
     _log.SubViewsLaidOut += (_, _) =>
     {
+      // Wrapped for the width the log had, which changes with the terminal and with the
+      // vertical scroll bar coming and going.
+      if (_log.Viewport.Width > 0 && _log.Viewport.Width != _wrapWidth)
+      {
+        RewrapLog();
+        _scrollLogToEnd = true;
+      }
+
       if (!_scrollLogToEnd)
       {
         return;
@@ -97,28 +115,7 @@ internal sealed partial class PreviewChrome
       _log.Viewport = _log.Viewport with { Y = bottom };
     };
 
-    _log.MouseEvent += (_, mouse) =>
-    {
-      if (mouse.Position is not { } pos)
-      {
-        return;
-      }
-
-      int index = _log.Viewport.Y + pos.Y;
-      LogLink? link = LinkAt(index, _log.Viewport.X + pos.X);
-
-      if (mouse.Flags.HasFlag(MouseFlags.LeftButtonClicked) && link is not null)
-      {
-        Link.OpenUrl(DiagnosticsLog.EditorUrl(link));
-        mouse.Handled = true;
-        return;
-      }
-
-      if (mouse.Flags.HasFlag(MouseFlags.PositionReport))
-      {
-        SetHoveredLine(link is null ? null : index);
-      }
-    };
+    _log.MouseEvent += (_, mouse) => OnLogMouse(mouse);
 
     _log.MouseLeave += (_, _) => SetHoveredLine(null);
 
@@ -127,16 +124,139 @@ internal sealed partial class PreviewChrome
     Link.SafeSchemes.Add(DiagnosticsLog.EditorScheme);
   }
 
-  /// <summary>The link at a content position of the log, if there is one.</summary>
-  private LogLink? LinkAt(int index, int column)
+  /// <summary>
+  /// Wraps the log to the current width and shows the rows. Before the first layout there is
+  /// no width yet; the lines stay unwrapped until the layout pass wraps them.
+  /// </summary>
+  private void RewrapLog()
   {
-    if (index < 0 || index >= _logWriter.Lines.Count || _logWriter.Lines[index] is not { Link: { } link } line)
+    _wrapWidth = _log.Viewport.Width;
+    IReadOnlyList<LogLine> lines = _logWriter.Lines;
+    _logRows = LogWrap.Wrap(lines, _wrapWidth > 0 ? _wrapWidth : int.MaxValue);
+    _logHighlighter.Rows = _logRows;
+    _log.Text = string.Join("\n", _logRows.Select(r => r.Text(lines[r.Line])));
+  }
+
+  /// <summary>The link at a content position of the log, if there is one.</summary>
+  private LogLink? LinkAt(int row, int column)
+  {
+    if (row < 0 || row >= _logRows.Count || _logWriter.Lines[_logRows[row].Line] is not { Link: { } link } line)
     {
       return null;
     }
 
-    (int start, int end) = link.Columns(line.Text);
-    return column >= start && column < end ? link : null;
+    return link.Contains(_logRows[row].CharAt(line, column)) ? link : null;
+  }
+
+  /// <summary>
+  /// Mouse handling for the log. A click on a link opens the file. Otherwise pressing and
+  /// dragging marks whole log lines, and releasing copies them unwrapped; a click without a
+  /// drag copies the line under the mouse. Lines rather than characters because a log is read
+  /// and pasted by line. For characters, the terminal's own selection (Shift+drag) still works.
+  /// </summary>
+  private void OnLogMouse(Mouse mouse)
+  {
+    if (mouse.Position is not { } pos)
+    {
+      return;
+    }
+
+    int row = _log.Viewport.Y + pos.Y;
+    LogLink? link = LinkAt(row, _log.Viewport.X + pos.X);
+    int lastRow = _logRows.Count - 1;
+
+    if (mouse.Flags == MouseFlags.LeftButtonPressed)
+    {
+      if (row < 0 || row > lastRow)
+      {
+        return;
+      }
+
+      int index = _logRows[row].Line;
+
+      // Grabbed, so the drag keeps arriving here when it leaves the log.
+      _log.App?.Mouse.GrabMouse(_log);
+      _selectAnchor = index;
+      _selectDragged = false;
+      SetSelection(link is null ? (index, index) : null);
+      mouse.Handled = true;
+      return;
+    }
+
+    if (mouse.Flags == (MouseFlags.LeftButtonPressed | MouseFlags.PositionReport) && _selectAnchor is { } anchor)
+    {
+      // Past the top or bottom edge, scroll one row, so a selection can reach beyond view.
+      if (pos.Y < 0 || pos.Y >= _log.Viewport.Height)
+      {
+        int y = Math.Clamp(_log.Viewport.Y + Math.Sign(pos.Y), 0, Math.Max(0, lastRow + 1 - _log.Viewport.Height));
+        _log.Viewport = _log.Viewport with { Y = y };
+      }
+
+      int end = _logRows[Math.Clamp(row, 0, lastRow)].Line;
+      _selectDragged |= end != anchor;
+      SetSelection((Math.Min(anchor, end), Math.Max(anchor, end)));
+      mouse.Handled = true;
+      return;
+    }
+
+    // Released even without an anchor: new log text drops the anchor during a drag.
+    if (mouse.Flags.HasFlag(MouseFlags.LeftButtonReleased) && _log.App?.Mouse.IsGrabbed(_log) == true)
+    {
+      _log.App.Mouse.UngrabMouse();
+    }
+
+    if (mouse.Flags.HasFlag(MouseFlags.LeftButtonReleased) && _selectAnchor is not null)
+    {
+      _selectAnchor = null;
+
+      // A plain click on a link is left to the click event that follows, which opens it.
+      if (_logHighlighter.Selection is { } rows)
+      {
+        CopyRows(rows.Start, rows.End);
+      }
+
+      mouse.Handled = true;
+      return;
+    }
+
+    if (mouse.Flags.HasFlag(MouseFlags.LeftButtonClicked))
+    {
+      // After a drag the click belongs to the selection, even when it ends on a link.
+      if (link is not null && !_selectDragged)
+      {
+        Link.OpenUrl(DiagnosticsLog.EditorUrl(link));
+      }
+
+      mouse.Handled = true;
+      return;
+    }
+
+    if (mouse.Flags == MouseFlags.PositionReport)
+    {
+      SetHoveredLine(link is null ? null : _logRows[row].Line);
+    }
+  }
+
+  private void CopyRows(int start, int end)
+  {
+    string text = string.Join(Environment.NewLine,
+        _logWriter.Lines.Skip(start).Take(end - start + 1).Select(l => l.Text));
+    int count = end - start + 1;
+
+    NewEntryInfo.Text = _log.App?.Clipboard?.TrySetClipboardData(text) == true
+        ? $"copied {count} {(count == 1 ? "row" : "rows")}"
+        : "could not copy to the clipboard";
+  }
+
+  private void SetSelection((int Start, int End)? rows)
+  {
+    if (_logHighlighter.Selection == rows)
+    {
+      return;
+    }
+
+    _logHighlighter.Selection = rows;
+    RestyleLog();
   }
 
   private void SetHoveredLine(int? index)
@@ -147,7 +267,11 @@ internal sealed partial class PreviewChrome
     }
 
     _logHighlighter.HoveredLine = index;
+    RestyleLog();
+  }
 
+  private void RestyleLog()
+  {
     // Code highlights only when its text, language or highlighter changes. Setting the same
     // highlighter again would be ignored, so it is removed and put back.
     _log.SyntaxHighlighter = null;
@@ -198,8 +322,24 @@ internal sealed partial class PreviewChrome
   private int CalcLogPaneHeight(int maxLogPanePercent = 30, int minLogPaneHeight = 3)
   {
     int max = Math.Max(minLogPaneHeight, Splitter.Viewport.Height * maxLogPanePercent / 100);
-    int wanted = (_logWriter?.SegmentLineI ?? 0) + 1 /* segment header */ + 1 /* divider */;
+    int wanted = CurrentSegmentRows() + 1 /* divider */;
     return Math.Clamp(wanted, minLogPaneHeight, max);
+  }
+
+  /// <summary>
+  /// The display rows of the current segment, its header included. Rows rather than lines,
+  /// so a wrapped message still fits. The rows depend only on the width, so sizing the pane
+  /// by them does not feed back into the wrap.
+  /// </summary>
+  private int CurrentSegmentRows()
+  {
+    if (_logWriter is null)
+    {
+      return 1;
+    }
+
+    int firstLine = _logWriter.Lines.Count - (_logWriter.SegmentLineI + 1 /* segment header */);
+    return _logRows.Count(r => r.Line >= firstLine);
   }
 
   private void UpdateStatus()
@@ -207,7 +347,10 @@ internal sealed partial class PreviewChrome
     string summary = _logWriter.GetDiagnosticsSummary();
     NewEntryInfo.Text = summary;
     string summaryShort = _logWriter.GetDiagnosticsSummary(20);
-    Splitter.FirstCollapsedText = $"↓ Show Log - {summaryShort} ↓";
+    Splitter.FirstCollapsedText = $"Show Log - {summaryShort}";
+
+    string summaryExtra = _logWriter.GetDiagnosticsSummary(10);
+    Splitter.SecondCollapsedText = $"Show Preview - {summaryShort}";
 
     if (_logWriter.GetCurrentSegmentI() == 0)
       return; // Leave Log as initialized

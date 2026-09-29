@@ -186,6 +186,12 @@ public class Splitter : View
     /// <summary>Die Hälfte, die den Rest füllt.</summary>
     public View FillView => fixedPane == SplitterPane.First ? Second : First;
 
+    /// <summary>
+    /// Der Button, der eine eingeklappte Hälfte wieder aufklappt — etwa um ihm eigene Farben
+    /// zu geben. Sichtbarkeit, Text und Position verwaltet der Splitter.
+    /// </summary>
+    public View ExpandButton => expandButton;
+
     /// <summary>Wird ausgelöst, wenn eine Hälfte ein- oder wieder aufgeklappt wird.</summary>
     public event EventHandler? CollapsedChanged;
 
@@ -385,8 +391,10 @@ public class Splitter : View
             (false, true) => "↓",
             _ => "↑"
         };
-        var name = string.IsNullOrEmpty(hidden.Title) ? hidden.Id : hidden.Title;
-        expandButton.Text = (atStart ? FirstCollapsedText : SecondCollapsedText) ?? $"{arrow} {name} {arrow}";
+
+        var name = (atStart ? FirstCollapsedText : SecondCollapsedText) 
+                    ?? (string.IsNullOrEmpty(hidden.Title) ? hidden.Id : hidden.Title);
+        expandButton.Text = $"{arrow} {name} {arrow}";
         expandButton.TextDirection = Horizontal ? TextDirection.TopBottom_LeftRight : TextDirection.LeftRight_TopBottom;
 
         // Genau eine Zeile bzw. Spalte, damit der Button am Rand sitzt (ohne Schatten-Rand).

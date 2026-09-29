@@ -21,7 +21,13 @@ internal sealed partial class PreviewChrome : Runnable
   public const string DefaultPreviewPlaceholderText =
       "No view hosted yet.\n\nThe previewed view appears here.";
 
-  private const int ToolbarHeight = 1; 
+  private const int ToolbarHeight = 1;
+
+  // Dark, but set off from the log below: VS Code's panel header grey for the toolbar, and
+  // its selection blue for the buttons that bring back a collapsed pane. Fixed RGB, as the
+  // log colours are.
+  private static readonly Color ToolbarBackground = new(0x2D, 0x2D, 0x30);
+  private static readonly Color ExpandButtonBackground = new(0x26, 0x4F, 0x78);
 
   // Clickable because VS Code's terminal does not deliver every key.
   public readonly Shortcut RebuildButton = new() { Title = "⟳ Rebuild", Key = Key.F5 };
@@ -62,7 +68,9 @@ internal sealed partial class PreviewChrome : Runnable
     // Without a language, Code ignores its highlighter.
     Language = "log",
     BorderStyle = LineStyle.None,
-    ViewportSettings = ViewportSettingsFlags.HasVerticalScrollBar | ViewportSettingsFlags.HasHorizontalScrollBar,
+    // Replaces the flags Code sets itself, which include a horizontal scroll bar. The logic
+    // half wraps long lines instead.
+    ViewportSettings = ViewportSettingsFlags.HasVerticalScrollBar,
   };
 
   public View LogPane { get; } = new()
@@ -117,7 +125,6 @@ internal sealed partial class PreviewChrome : Runnable
     ViewportSettings = ViewportSettingsFlags.Transparent;
 
     _log.VerticalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
-    _log.HorizontalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
 
     LogPane.Add(_toolbarRow, _log);
     Splitter.First.Add(LogPane);
@@ -127,6 +134,9 @@ internal sealed partial class PreviewChrome : Runnable
 
     BuildToolbar();
     _titleLabel.Text = Title;
+
+    SetBackground(_toolbarRow, ToolbarBackground);
+    SetBackground(Splitter.ExpandButton, ExpandButtonBackground);
 
     Add(Splitter);
   }
@@ -141,5 +151,23 @@ internal sealed partial class PreviewChrome : Runnable
     }
 
     _toolbarRow.Add(items);
+  }
+
+  /// <summary>
+  /// Gives <paramref name="view"/> and every subview without a scheme of its own a
+  /// background, keeping the theme's foregrounds. Subviews ask their SuperView for their
+  /// colours, so one handler covers the whole toolbar. Focus keeps the theme's colours, so a
+  /// focused item still stands out.
+  /// </summary>
+  private static void SetBackground(View view, Color background)
+  {
+    view.GettingAttributeForRole += (_, e) =>
+    {
+      if (e.Role is VisualRole.Normal or VisualRole.HotNormal or VisualRole.Disabled && e.Result is { } attribute)
+      {
+        e.Result = attribute with { Background = background };
+        e.Handled = true;
+      }
+    };
   }
 }
