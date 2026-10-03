@@ -889,6 +889,31 @@ async function viewSettingsTests() {
         h.assert.ok(commentedLine.includes("--width 50"), commentedLine);
     });
 
+    const lastOut = h.writeView(root, "LastOut.tui.cs", h.layoutHalf("Demo", "LastOut"));
+    fs.writeFileSync(
+        path.join(root, "tests", "LastOut.tui.json"),
+        '{\n  "width": 51,\n  // "height": 12,\n  /* block */\n}\n'
+    );
+    h.edit(lastOut);
+    const lastOutLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a trailing comma before a commented-out last entry is still trailing", () => {
+        h.assert.ok(lastOutLine.includes("--width 51"), lastOutLine);
+    });
+
+    const broken = h.writeView(root, "Broken.tui.cs", h.layoutHalf("Demo", "Broken"));
+    fs.writeFileSync(path.join(root, "tests", "Broken.tui.json"), '{ "width": 51 ');
+    h.edit(broken);
+    await h.run("tuiLivePreview.render");
+
+    h.test("a sidecar that does not parse is reported, not silently dropped", () => {
+        const lines = (vscode.window.channels ?? []).flatMap((c) => c.lines);
+        h.assert.ok(
+            lines.some((l) => l.includes("Broken.tui.json") && l.includes("not valid JSON")),
+            "expected the log to name the broken sidecar"
+        );
+    });
+
     console.log("annotation vs sidecar");
 
     const both = h.writeView(
@@ -1060,6 +1085,163 @@ async function viewSettingsTests() {
         );
     });
 
+    console.log("annotation overriding the sidecar");
+
+    const overridden = h.writeView(
+        root,
+        "Overridden.tui.cs",
+        "// @tuipreview class=Demo.Overridden width=70\n" + h.layoutHalf("Demo", "Overridden")
+    );
+    fs.writeFileSync(
+        path.join(root, "tests", "Overridden.tui.json"),
+        JSON.stringify({ class: "Demo.Overridden", width: 40 })
+    );
+    h.edit(overridden);
+    const shown = [];
+    const originalWarning = vscode.window.showWarningMessage;
+    vscode.window.showWarningMessage = (m) => {
+        shown.push(m);
+    };
+    await h.run("tuiLivePreview.render");
+    vscode.window.showWarningMessage = originalWarning;
+
+    h.test("an annotation overriding the sidecar is shown as a warning", () => {
+        h.assert.strictEqual(shown.length, 1, JSON.stringify(shown));
+        h.assert.ok(shown[0].includes('"width"') && shown[0].includes("overrides"), shown[0]);
+        h.assert.ok(shown[0].includes("Overridden.tui.json"), shown[0]);
+    });
+
+    h.test("a key both state with the same value is not an override", () => {
+        // The class agrees, so only the width is worth a word.
+        h.assert.ok(!shown[0].includes('"class"'), shown[0]);
+    });
+
+    return root;
+}
+
+/**
+ * The init command: detect what a view would preview with, then write it to the place the user
+ * picks in the modal. Each case answers the modal through `answer`, so the tests cover exactly
+ * the two buttons plus cancel.
+ */
+async function initTests() {
+    const root = h.makeWorkspace();
+    h.setWorkspace(root, { width: 55 });
+    vscode.__state._commands = {};
+    vscode.__state.textDocuments = [];
+    h.ext.activate({ subscriptions: [] });
+
+    async function init(file, answer) {
+        let asked;
+        const original = vscode.window.showInformationMessage;
+        vscode.window.showInformationMessage = async (message, options, ...buttons) => {
+            if (options?.modal) {
+                asked = { message, detail: options.detail, buttons };
+                return buttons.find((b) => b.startsWith(answer));
+            }
+            return undefined;
+        };
+        await vscode.__state._commands["tuiLivePreview.init"](vscode.Uri.file(file));
+        vscode.window.showInformationMessage = original;
+        return asked;
+    }
+
+    console.log("\ninit: sidecar");
+
+    const plain = h.writeView(root, "Plain.tui.cs", h.layoutHalf("Demo", "Plain"));
+    const asked = await init(plain, "Sidecar");
+    const plainSidecar = path.join(root, "tests", "Plain.tui.json");
+
+    h.test("init asks where to put the settings, showing what it detected", () => {
+        h.assert.ok(asked, "no modal was shown");
+        h.assert.strictEqual(asked.buttons.length, 2, JSON.stringify(asked.buttons));
+        h.assert.ok(asked.detail.includes("class=Demo.Plain"), asked.detail);
+        h.assert.ok(asked.detail.includes("width=55"), asked.detail);
+    });
+
+    h.test("init writes a sidecar named after the view", () => {
+        h.assert.ok(fs.existsSync(plainSidecar), "no sidecar was written");
+    });
+
+    // The written sidecar must be one both readers accept, so it is read back through a real
+    // render rather than inspected as text. The width setting is cleared first, so a --width 55
+    // can only have come from the sidecar.
+    vscode.__state.configuration = {};
+    h.edit(plain);
+    const plainLine = h.lastLine(await h.run("tuiLivePreview.render"));
+    vscode.__state.configuration = { tuiLivePreview: { width: 55 } };
+
+    h.test("the sidecar init writes is read back by a preview", () => {
+        h.assert.ok(plainLine.includes('--class "Demo.Plain"'), plainLine);
+        h.assert.ok(plainLine.includes("--width 55"), plainLine);
+        h.assert.ok(plainLine.includes("--height 24"), plainLine);
+    });
+
+    h.test("the sidecar documents the optional keys as comments", () => {
+        const body = fs.readFileSync(plainSidecar, "utf8");
+        h.assert.ok(body.includes('// "extra"'), body);
+        h.assert.ok(body.includes('// "reference"'), body);
+    });
+
+    fs.writeFileSync(plainSidecar, '{ "width": 99 }');
+    await init(plain, "Sidecar");
+
+    h.test("init never overwrites an existing sidecar", () => {
+        h.assert.strictEqual(fs.readFileSync(plainSidecar, "utf8"), '{ "width": 99 }');
+    });
+
+    console.log("init: annotation");
+
+    const bare = h.writeView(root, "Bare.tui.cs", h.layoutHalf("Demo", "Bare"));
+    await init(bare, "Annotation");
+    const bareText = fs.readFileSync(bare, "utf8");
+
+    h.test("init puts the annotation on the first line of the view", () => {
+        h.assert.ok(
+            bareText.startsWith("// @tuipreview class=Demo.Bare width=55 height=24\n"),
+            bareText.split("\n")[0]
+        );
+    });
+
+    h.test("init leaves the rest of the view as it was", () => {
+        h.assert.ok(bareText.endsWith(h.layoutHalf("Demo", "Bare")), bareText);
+    });
+
+    h.test("init writes no sidecar when the annotation is chosen", () => {
+        h.assert.ok(!fs.existsSync(path.join(root, "tests", "Bare.tui.json")));
+    });
+
+    await init(bare, "Annotation");
+
+    h.test("init does not add a second annotation", () => {
+        const count = fs.readFileSync(bare, "utf8").split("@tuipreview").length - 1;
+        h.assert.strictEqual(count, 1);
+    });
+
+    const half = h.writeView(root, "Half.tui.cs", h.layoutHalf("Demo", "Half"));
+    fs.writeFileSync(
+        path.join(root, "tests", "Half.tui.json"),
+        JSON.stringify({ class: "Demo.Half", width: 40 })
+    );
+    await init(half, "Annotation");
+
+    h.test("init only writes what the sidecar does not already state", () => {
+        // Repeating class and width in the annotation would shadow any later edit to the
+        // sidecar, which is the one place the user put them on purpose.
+        const first = fs.readFileSync(half, "utf8").split("\n")[0];
+        h.assert.strictEqual(first, "// @tuipreview height=24");
+    });
+
+    console.log("init: cancel");
+
+    const untouched = h.writeView(root, "Untouched.tui.cs", h.layoutHalf("Demo", "Untouched"));
+    await init(untouched, "nothing matches this");
+
+    h.test("cancelling init writes nothing", () => {
+        h.assert.strictEqual(fs.readFileSync(untouched, "utf8"), h.layoutHalf("Demo", "Untouched"));
+        h.assert.ok(!fs.existsSync(path.join(root, "tests", "Untouched.tui.json")));
+    });
+
     return root;
 }
 
@@ -1082,6 +1264,9 @@ void main().then(async (root) => {
 
     const settingsRoot = await viewSettingsTests();
     fs.rmSync(settingsRoot, { recursive: true, force: true });
+
+    const initRoot = await initTests();
+    fs.rmSync(initRoot, { recursive: true, force: true });
 
     console.log(`\n${h.state.passed} passed, ${h.state.failed} failed`);
     process.exitCode = h.state.failed === 0 ? 0 : 1;

@@ -16,11 +16,20 @@ internal static class InteractiveSession
     /// scratch file is what changes, and that is what has to be polled.
     /// </param>
     /// <param name="build">Produces the view. See <see cref="PreviewBuilder"/>.</param>
+    /// <param name="warnings">
+    /// Problems with the view's own settings. They were printed before the session started, but
+    /// the session takes over the screen, so they are repeated in the log pane to stay visible.
+    /// </param>
     public static int Run(string displayName, string watchedPath,
-        Func<RenderPipeline.BuildResult> build)
+        Func<RenderPipeline.BuildResult> build, IReadOnlyList<string> warnings)
     {
         var builder = new PreviewBuilder(displayName, watchedPath, build);
         var runnable = builder.Chrome;
+
+        foreach (string warning in warnings)
+        {
+            runnable.AppendLog($"warning: {warning}", LogKind.Warning);
+        }
 
         using IApplication app = Application.Create();
         app.Init(DriverRegistry.Names.ANSI);

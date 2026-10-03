@@ -25,6 +25,8 @@ Per-view settings live with the view, not in the editor settings, because a view
 
 `clipath` is read only by the extension: the tool cannot act on it, since it *is* the tool. It outranks the `tuiLivePreview.cliPath` setting, which is the folder-wide default.
 
+When the annotation overrides a single-valued key (`class`, `width`, `height`, `clipath`) that the sidecar states differently, both sides warn: the tool on stderr and in the interactive log pane, the extension in a toast. Lists add up and never warn.
+
 The annotation outranks the sidecar because it is what the author is looking at, and because a sidecar cannot describe an unsaved buffer: the extension reads settings from the open document's text, so an annotation typed but not yet saved is the one that applies.
 
 Full chain for `--class`: explicit flag → annotation → sidecar → `tuiLivePreview.className` → inferred from the file → prompt. `--width`/`--height` are `int?` rather than defaulting to 80/24 precisely so "unset" is distinguishable and a view's own size can win.
@@ -39,7 +41,7 @@ Both sides implement this, deliberately: `cli/ViewSettings.cs` (with `InferClass
    - `ResolvedPreview.cs` is the resolved value handed from option parsing to the render, so the two halves cannot disagree about which class, files or references are in play.
    - `Views/` contains the preview chrome (log pane plus splitter). `PreviewChrome.tui.cs`/`PreviewChrome.cs` follow the same split and can be previewed themselves.
 2. **`controls/TuiControls/`**: Terminal.Gui controls that views may use (the `Splitter` so far). It is referenced by the tool and packed on its own, so it can grow into a control library.
-3. **`vscode-extension/`**: adds "TUI Preview" commands (Interactive, Render Once, Watch) to the explorer and editor context menus for `*.tui.cs` files. It runs the tool on the view and mirrors unsaved buffers to a scratch file so previews stay live. Almost all of the logic is in `src/extension.ts`.
+3. **`vscode-extension/`**: adds "TUI Preview" commands (Interactive, Render Once, Watch, Init) to the explorer and editor context menus for `*.tui.cs` files. Init detects the view's class and size and writes them, after a modal asking where, to a new `.tui.json` sidecar or a `// @tuipreview` line at the top of the view. It writes only keys the view does not already state, and never overwrites. It runs the tool on the view and mirrors unsaved buffers to a scratch file so previews stay live. Almost all of the logic is in `src/extension.ts`.
    - The tool ships inside the VSIX: `install-ext.ps1` publishes it into `vscode-extension/tool/` (gitignored) before packaging, and the extension runs it with `dotnet tool/tuipreview.dll`.
    - The lookup order is `cliPath` setting → `cli/bin` build → `dotnet run` on `cli/` → bundled copy → `tuipreview` on PATH. A workspace copy of the tool wins, so this repo previews with its own changes.
 

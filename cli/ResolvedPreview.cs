@@ -42,6 +42,13 @@ internal sealed record ResolvedPreview
   /// <summary>Render height in rows. Interactive mode fills the terminal and ignores this.</summary>
   public required int Height { get; init; }
 
+  /// <summary>
+  /// Problems with the view's own settings, already printed to stderr. Carried here as well
+  /// because the interactive preview takes over the screen and would wipe them, so it repeats
+  /// them in its log pane.
+  /// </summary>
+  public required IReadOnlyList<string> Warnings { get; init; }
+
   /// <summary>Which source supplied the view's settings, for the log line. "none" when it stated nothing.</summary>
   public required string SettingsSource { get; init; }
 }

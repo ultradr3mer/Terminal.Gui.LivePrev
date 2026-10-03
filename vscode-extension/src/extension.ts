@@ -39,6 +39,9 @@ interface Resolved {
     /** The size the view asked for, so `launch` can prefer it over the workspace-wide setting. */
     width?: number;
     height?: number;
+
+    /** Problems with the view's own settings, already logged; `launch` also shows them. */
+    warnings: string[];
 }
 
 /**
@@ -61,6 +64,12 @@ interface ViewSettings {
     cliPath?: string;
 
     warnings: string[];
+
+    /**
+     * Which file last stated each single-valued key, and what it said. Kept so an annotation that
+     * overrides the sidecar can say so, rather than one of the sidecar's values silently losing.
+     */
+    stated: Record<string, { value: string; origin: string }>;
 }
 
 /**
@@ -91,7 +100,7 @@ function logLine(message: string): void {
  * Surfaced in the status bar and the log so "command not found" is never a mystery: a
  * stale host runs old code while VS Code shows the new menu entries from package.json.
  */
-const BUILD = "2026-10-03.1";
+const BUILD = "2026-10-03.2";
 
 /** Shows which build is live, so a stale Extension Development Host is immediately visible. */
 let status: vscode.StatusBarItem | undefined;
@@ -165,6 +174,23 @@ async function launch(mode: Mode, picked?: vscode.Uri): Promise<void> {
     const resolved = await resolve(picked);
     const cfg = vscode.workspace.getConfiguration("tuiLivePreview");
 
+    // Shown, not just logged: an annotation overriding the sidecar, or a typo in either, changes
+    // what is previewed, and the log is not where anyone looks while a preview starts. Not
+    // awaited, because a warning must never hold up a preview that is otherwise fine.
+    if (resolved.warnings.length > 0) {
+        const more = resolved.warnings.length - 1;
+        void Promise.resolve(
+            vscode.window.showWarningMessage(
+                `TUI Preview: ${resolved.warnings[0]}` + (more > 0 ? ` (and ${more} more)` : ""),
+                "Show Log"
+            )
+        ).then((choice) => {
+            if (choice === "Show Log") {
+                showLog();
+            }
+        });
+    }
+
     const extra: string[] = [];
     if (mode === "watch") {
         extra.push("--watch");
@@ -211,6 +237,161 @@ async function launch(mode: Mode, picked?: vscode.Uri): Promise<void> {
     terminal.show(false);
 }
 
+/** The two places a view can carry its own settings, as offered by `init`. */
+type InitTarget = "sidecar" | "annotation";
+
+/**
+ * Gives a view its own preview settings: detects what it would preview with today and writes
+ * that down, either to a `.tui.json` sidecar or as a `// @tuipreview` annotation at the top of
+ * the view.
+ *
+ * Only what the view does not already state is written. The detected values come from the
+ * view's existing settings first, so writing all of them into the other file would duplicate
+ * them, and the duplicate in the annotation would then shadow any later edit to the sidecar.
+ *
+ * It never overwrites: a sidecar that already exists, or an annotation already in the view, is
+ * opened instead. Both are hand-edited files, and init has no way to merge into one without
+ * losing the comments and ordering their author chose.
+ */
+async function init(picked?: vscode.Uri): Promise<void> {
+    const view = pickView(picked);
+    const { text } = readView(view);
+    const name = path.basename(view);
+    const sidecar = sidecarPathFor(view);
+
+    const current = readViewSettings(view, text);
+    const cfg = vscode.workspace.getConfiguration("tuiLivePreview");
+
+    // The values a preview would use right now, which is what makes them safe defaults: writing
+    // them down changes nothing about how the view renders, it only pins it.
+    const detected: [string, string][] = [
+        ["class", await resolveClassName(view, text, current)],
+        ["width", String(current.width ?? cfg.get<number>("width", 80))],
+        ["height", String(current.height ?? cfg.get<number>("height", 24))],
+    ];
+    logLine(`init: detected ${detected.map(([k, v]) => `${k}=${v}`).join(" ")} for ${name}`);
+
+    const sidecarLabel = `Sidecar (${path.basename(sidecar)})`;
+    const annotationLabel = "Annotation in the view";
+    const choice = await vscode.window.showInformationMessage(
+        `Where should the preview settings for ${name} go?`,
+        {
+            modal: true,
+            detail:
+                `Detected: ${detected.map(([k, v]) => `${k}=${v}`).join(", ")}.\n\n` +
+                `A sidecar is a JSON file next to the view. An annotation is a ` +
+                `"// @tuipreview" comment at the top of the view, and wins over the sidecar ` +
+                `wherever both state the same key.`,
+        },
+        sidecarLabel,
+        annotationLabel
+    );
+
+    if (choice !== sidecarLabel && choice !== annotationLabel) {
+        logLine("init: cancelled");
+        return;
+    }
+
+    const target: InitTarget = choice === sidecarLabel ? "sidecar" : "annotation";
+    const missing = detected.filter(([key]) => current.stated[key] === undefined);
+
+    if (target === "sidecar") {
+        await initSidecar(view, sidecar, missing);
+    } else {
+        await initAnnotation(view, text, missing);
+    }
+}
+
+/** Writes a new sidecar holding `entries`, plus the optional keys as commented-out examples. */
+async function initSidecar(view: string, sidecar: string, entries: [string, string][]): Promise<void> {
+    if (fs.existsSync(sidecar)) {
+        logLine(`init: ${sidecar} already exists; opening it instead`);
+        await openInEditor(sidecar);
+        void vscode.window.showInformationMessage(
+            `TUI Preview: ${path.basename(sidecar)} already exists, so it was opened rather than overwritten.`
+        );
+        return;
+    }
+
+    // Numbers stay numbers, because the sidecar is JSON and both readers expect "width": 80.
+    const lines = entries.map(([key, value]) =>
+        `  "${key}": ${key === "class" ? JSON.stringify(value) : value},`
+    );
+
+    // The commented-out keys are the documentation: a sidecar is the place for the settings
+    // that do not fit one comment line, and nobody remembers their names. Both readers skip
+    // comments and tolerate the trailing commas.
+    const body =
+        `{\n` +
+        `  // Preview settings for ${path.basename(view)}, read by TUI Live Preview.\n` +
+        `  // A "// @tuipreview key=value" line in the view overrides any key here.\n` +
+        lines.map((l) => `${l}\n`).join("") +
+        `  // "extra": ["Layout/Shared.cs"],\n` +
+        `  // "reference": ["../lib/Controls.dll"],\n` +
+        `  // "clipath": "../tools/tuipreview.dll",\n` +
+        `}\n`;
+
+    fs.writeFileSync(sidecar, body, "utf8");
+    logLine(`init: wrote ${sidecar}`);
+    await openInEditor(sidecar);
+}
+
+/**
+ * Puts a `// @tuipreview` line holding `entries` at the top of the view.
+ *
+ * Done as an edit to the document rather than a write to disk, so it lands in the user's undo
+ * history and does not race an open buffer with unsaved changes. A buffer that had none is saved
+ * afterwards, so the tool, which reads from disk, sees the same thing the editor shows.
+ */
+async function initAnnotation(view: string, text: string, entries: [string, string][]): Promise<void> {
+    const name = path.basename(view);
+
+    if (new RegExp(ANNOTATION.source, "m").test(text)) {
+        logLine(`init: ${name} already has a @tuipreview annotation`);
+        await openInEditor(view);
+        void vscode.window.showInformationMessage(
+            `TUI Preview: ${name} already has a // @tuipreview annotation; edit that line instead.`
+        );
+        return;
+    }
+
+    if (entries.length === 0) {
+        void vscode.window.showInformationMessage(
+            `TUI Preview: ${path.basename(sidecarPathFor(view))} already states everything init ` +
+            `would write, so ${name} was left as it is.`
+        );
+        return;
+    }
+
+    // Quoted only when the annotation grammar needs it: an unquoted value ends at whitespace,
+    // a comma or a semicolon.
+    const pairs = entries.map(([key, value]) =>
+        /[\s,;]/.test(value) ? `${key}="${value}"` : `${key}=${value}`
+    );
+    const line = `// @tuipreview ${pairs.join(" ")}\n`;
+
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(view));
+    const wasDirty = doc.isDirty;
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.insert(doc.uri, new vscode.Position(0, 0), line);
+    if (!(await vscode.workspace.applyEdit(edit))) {
+        throw new Error(`Could not add the @tuipreview annotation to ${name}.`);
+    }
+
+    if (!wasDirty) {
+        await doc.save();
+    }
+
+    logLine(`init: added "${line.trim()}" to ${name}`);
+    await vscode.window.showTextDocument(doc);
+}
+
+async function openInEditor(file: string): Promise<void> {
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    await vscode.window.showTextDocument(doc);
+}
+
 /**
  * Resolves the target file, its class name and how to launch the tool.
  *
@@ -218,36 +399,8 @@ async function launch(mode: Mode, picked?: vscode.Uri): Promise<void> {
  * least useful thing an extension can tell you.
  */
 async function resolve(picked?: vscode.Uri): Promise<Resolved> {
-    const clicked = pickViewUri(picked);
-    if (!clicked) {
-        throw new Error(
-            "No .tui.cs file could be determined. Open one, or right-click it in the explorer."
-        );
-    }
-    if (clicked.scheme !== "file") {
-        throw new Error("Only files on disk can be previewed (unsaved editors are not supported).");
-    }
-
-    const view = clicked.fsPath;
-    if (!isViewEntry(view)) {
-        throw new Error(
-            `${path.basename(view)} is not a previewable view. ` +
-            `Expected a name ending in .tui.cs.`
-        );
-    }
-
-    // The open document's text, when there is one. Settings are read from this rather than from
-    // disk so that an annotation the user has just typed but not saved is the one that applies.
-    const openDoc = vscode.workspace.textDocuments.find(
-        (d) => d.uri.scheme === "file" && d.uri.fsPath === view
-    );
-
-    let text: string;
-    try {
-        text = openDoc?.getText() ?? fs.readFileSync(view, "utf8");
-    } catch (err) {
-        throw new Error(`Could not read ${path.basename(view)}: ${String(err)}`);
-    }
+    const view = pickView(picked);
+    const { text, openDoc } = readView(view);
 
     const settings = readViewSettings(view, text);
     for (const warning of settings.warnings) {
@@ -276,7 +429,7 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         }
     }
 
-    const className = await resolveClassName(view, settings);
+    const className = await resolveClassName(view, text, settings);
     const launcher = resolveLauncher(view, settings);
 
     // Whether to mirror the editor buffer rather than trusting what is on disk. Off means the
@@ -313,7 +466,50 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         references: settings.references,
         width: settings.width,
         height: settings.height,
+        warnings: settings.warnings,
     };
+}
+
+/**
+ * The view a command targets, as a path. Throws a message naming what is wrong with the target.
+ */
+function pickView(picked?: vscode.Uri): string {
+    const clicked = pickViewUri(picked);
+    if (!clicked) {
+        throw new Error(
+            "No .tui.cs file could be determined. Open one, or right-click it in the explorer."
+        );
+    }
+    if (clicked.scheme !== "file") {
+        throw new Error("Only files on disk can be previewed (unsaved editors are not supported).");
+    }
+
+    const view = clicked.fsPath;
+    if (!isViewEntry(view)) {
+        throw new Error(
+            `${path.basename(view)} is not a previewable view. ` +
+            `Expected a name ending in .tui.cs.`
+        );
+    }
+
+    return view;
+}
+
+/**
+ * The view's text, from the open document when there is one. Settings are read from this rather
+ * than from disk so that an annotation the user has just typed but not saved is the one that
+ * applies.
+ */
+function readView(view: string): { text: string; openDoc?: vscode.TextDocument } {
+    const openDoc = vscode.workspace.textDocuments.find(
+        (d) => d.uri.scheme === "file" && d.uri.fsPath === view
+    );
+
+    try {
+        return { text: openDoc?.getText() ?? fs.readFileSync(view, "utf8"), openDoc };
+    } catch (err) {
+        throw new Error(`Could not read ${path.basename(view)}: ${String(err)}`);
+    }
 }
 
 /**
@@ -401,17 +597,29 @@ function findViewFile(root: string, depth = 4): string | undefined {
  * a preview that is otherwise fine, and the warning names the file so it can be found again.
  */
 function readViewSettings(view: string, text: string): ViewSettings {
-    const settings: ViewSettings = { extra: [], references: [], warnings: [] };
+    const settings: ViewSettings = { extra: [], references: [], warnings: [], stated: {} };
     const baseDir = path.dirname(view);
 
-    // A sidecar is optional and its absence is not a problem, so a read failure of any kind is
-    // simply "no settings over here".
-    const sidecar = view.replace(/\.tui\.cs$/, ".tui.json");
+    // A sidecar is optional and its absence is not a problem, so a read failure is simply "no
+    // settings over here". A sidecar that exists but does not parse is worth a warning, though:
+    // dropping it silently previews with none of the settings the user can see in it.
+    const sidecar = sidecarPathFor(view);
     let parsed: unknown;
+    let raw: string | undefined;
     try {
-        parsed = JSON.parse(stripJsonComments(fs.readFileSync(sidecar, "utf8")));
+        raw = fs.readFileSync(sidecar, "utf8");
     } catch {
-        parsed = undefined;
+        raw = undefined;
+    }
+
+    if (raw !== undefined) {
+        try {
+            parsed = JSON.parse(stripJsonComments(raw));
+        } catch (err) {
+            settings.warnings.push(
+                `${path.basename(sidecar)} is not valid JSON (${err instanceof Error ? err.message : String(err)}); ignoring it.`
+            );
+        }
     }
 
     if (parsed !== undefined) {
@@ -427,6 +635,28 @@ function readViewSettings(view: string, text: string): ViewSettings {
     return settings;
 }
 
+/** Where a view's sidecar lives: `MyView.tui.cs` goes with `MyView.tui.json`. */
+function sidecarPathFor(view: string): string {
+    return view.replace(/\.tui\.cs$/, ".tui.json");
+}
+
+/**
+ * Records that `origin` stated a single-valued key, warning when it replaces a different value
+ * from another file. In practice that is the annotation overriding the sidecar: the sidecar is
+ * read first, so without this one of its values would lose without a word. Lists (`extra`,
+ * `reference`) add up rather than override, so they never come through here.
+ */
+function noteStated(settings: ViewSettings, key: string, value: string, origin: string): void {
+    const earlier = settings.stated[key];
+    if (earlier && earlier.origin !== origin && earlier.value !== value) {
+        settings.warnings.push(
+            `${origin}: "${key}" = "${value}" overrides "${earlier.value}" from ${earlier.origin}.`
+        );
+    }
+
+    settings.stated[key] = { value, origin };
+}
+
 /** Applies one parsed source, validating each key and reporting the ones that are not usable. */
 function applyJson(
     settings: ViewSettings,
@@ -439,12 +669,14 @@ function applyJson(
             case "class":
                 if (typeof value === "string") {
                     settings.className = value.trim();
+                    noteStated(settings, "class", settings.className, origin);
                 }
                 break;
 
             case "clipath":
                 if (typeof value === "string" && value.trim().length > 0) {
                     settings.cliPath = path.resolve(baseDir, value.trim());
+                    noteStated(settings, "clipath", settings.cliPath, origin);
                 }
                 break;
 
@@ -455,6 +687,8 @@ function applyJson(
                     settings.warnings.push(`${origin}: "${key}" must be a positive whole number.`);
                     break;
                 }
+
+                noteStated(settings, key, String(size), origin);
 
                 if (key === "width") {
                     settings.width = size;
@@ -525,11 +759,13 @@ function applyAnnotation(
 
             if (lower === "class") {
                 settings.className = value;
+                noteStated(settings, "class", value, origin);
                 continue;
             }
 
             if (lower === "clipath") {
                 settings.cliPath = path.resolve(baseDir, value);
+                noteStated(settings, "clipath", settings.cliPath, origin);
                 continue;
             }
 
@@ -553,6 +789,8 @@ function applyAnnotation(
                     );
                     continue;
                 }
+
+                noteStated(settings, lower, String(size), origin);
 
                 if (lower === "width") {
                     settings.width = size;
@@ -631,10 +869,12 @@ function stripJsonComments(text: string): string {
             continue;
         }
 
-        // A comma directly before a closing brace or bracket is a trailing comma.
+        // A comma before a closing brace or bracket is a trailing comma. Comments may sit in
+        // between -- a commented-out last entry is exactly how a hand-edited file ends -- so
+        // they are skipped when looking ahead, not just whitespace.
         if (char === ",") {
             const rest = text.slice(index + 1);
-            if (/^\s*[}\]]/.test(rest)) {
+            if (/^(?:\s|\/\/[^\n]*|\/\*[\s\S]*?\*\/)*[}\]]/.test(rest)) {
                 index++;
                 continue;
             }
@@ -654,7 +894,11 @@ function stripJsonComments(text: string): string {
  * to remove: take the class the view declares for itself, else read the namespace and class
  * declaration out of the file, and only ask when that yields nothing.
  */
-async function resolveClassName(file: string, settings: ViewSettings): Promise<string> {
+async function resolveClassName(
+    file: string,
+    text: string,
+    settings: ViewSettings
+): Promise<string> {
     if (settings.className) {
         logLine(`class from the view's own settings: ${settings.className}`);
         return settings.className;
@@ -668,7 +912,7 @@ async function resolveClassName(file: string, settings: ViewSettings): Promise<s
         return override;
     }
 
-    const fromCSharp = readClassFromCSharp(file);
+    const fromCSharp = readClassFromCSharp(text);
     if (fromCSharp) {
         return fromCSharp;
     }
@@ -701,7 +945,10 @@ function isViewEntry(file: string): boolean {
 }
 
 /**
- * Extracts the fully qualified class name from a C# file.
+ * Extracts the fully qualified class name from C# source.
+ *
+ * Takes the text rather than a path so that it reads the open buffer, the same text the view's
+ * settings came from.
  *
  * Reads `namespace` plus the first class declaration. Without this every preview would prompt
  * for a name the file already states.
@@ -711,14 +958,7 @@ function isViewEntry(file: string): boolean {
  * simple rule and the correct one. It is usually `partial`, the layout half of a view whose
  * logic half is the sibling `.cs`, and that is exactly the class to preview.
  */
-function readClassFromCSharp(file: string): string | undefined {
-    let text: string;
-    try {
-        text = fs.readFileSync(file, "utf8");
-    } catch {
-        return undefined;
-    }
-
+function readClassFromCSharp(text: string): string | undefined {
     // Strip comments first, so a commented-out class cannot be picked up. A line comment
     // swallows the rest of the line; a block comment is removed wholesale.
     const withoutComments = text
@@ -1114,6 +1354,13 @@ export function activate(context: vscode.ExtensionContext): void {
     register("tuiLivePreview.render", "render");
     register("tuiLivePreview.watch", "watch");
     register("tuiLivePreview.interactive", "interactive");
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            "tuiLivePreview.init",
+            guard("tuiLivePreview.init", (picked) => init(picked))
+        )
+    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand("tuiLivePreview.showLog", () => showLog())

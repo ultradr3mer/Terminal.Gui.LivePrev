@@ -109,6 +109,7 @@ internal static class PreviewRunner
       Width = options.Width ?? settings.Width ?? 80,
       Height = options.Height ?? settings.Height ?? 24,
       SettingsSource = settings.Source,
+      Warnings = settings.Warnings,
     };
 
     // The rendered screen is box-drawing characters; without this they come out as mojibake.
@@ -164,12 +165,17 @@ internal static class PreviewRunner
 
     if (options.Interactive)
     {
-      return InteractiveSession.Run(displayName, source, build);
+      return InteractiveSession.Run(displayName, source, build, preview.Warnings);
     }
 
     if (options.UiSnapshot)
     {
       var ui = new PreviewBuilder(displayName, source, build);
+      foreach (string warning in preview.Warnings)
+      {
+        ui.Chrome.AppendLog($"warning: {warning}", LogKind.Warning);
+      }
+
       ui.Rebuild();
 
       for (int i = 1; i <= options.UiFlood; i++)

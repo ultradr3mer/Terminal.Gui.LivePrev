@@ -12,6 +12,10 @@ function makeWindow() {
         showInformationMessage: () => undefined,
         showInputBox: async () => undefined,
         showWarningMessage: () => undefined,
+        async showTextDocument(doc) {
+            (this.shownDocuments ??= []).push(doc.uri.fsPath);
+            return { document: doc };
+        },
         createTerminal(options) {
             const t = {
                 name: options?.name ?? "terminal",
@@ -126,6 +130,47 @@ const vscode = {
             (state._docChangeHandlers ??= []).push(handler);
             return { dispose() {} };
         },
+        // A document backed directly by the file: edits land on disk at once, which is what an
+        // applied-then-saved edit amounts to, and is all the tests need to observe.
+        async openTextDocument(uri) {
+            const open = (state.textDocuments ?? []).find((d) => d.uri.fsPath === uri.fsPath);
+            return (
+                open ?? {
+                    uri,
+                    isDirty: false,
+                    getText: () => fs.readFileSync(uri.fsPath, "utf8"),
+                    async save() {
+                        (state.saved ??= []).push(uri.fsPath);
+                        return true;
+                    },
+                }
+            );
+        },
+        async applyEdit(edit) {
+            for (const { uri, position, text } of edit.inserts) {
+                const lines = fs.readFileSync(uri.fsPath, "utf8").split("\n");
+                const line = lines[position.line] ?? "";
+                lines[position.line] =
+                    line.slice(0, position.character) + text + line.slice(position.character);
+                fs.writeFileSync(uri.fsPath, lines.join("\n"));
+            }
+            (state.appliedEdits ??= []).push(edit);
+            return true;
+        },
+    },
+    WorkspaceEdit: class {
+        constructor() {
+            this.inserts = [];
+        }
+        insert(uri, position, text) {
+            this.inserts.push({ uri, position, text });
+        }
+    },
+    Position: class {
+        constructor(line, character) {
+            this.line = line;
+            this.character = character;
+        }
     },
     commands: {
         registerCommand(name, fn) {

@@ -13,6 +13,7 @@ palette (**TUI Preview:**). They only appear on `*.tui.cs` files.
 | **Interactive (live view)** | Full Terminal.Gui app in a terminal: log pane on top, the real view below, so you can type in `TextField`s and press `Button`s. |
 | **Render Once** | Prints one frame as characters. Fast; good for a quick check. |
 | **Watch (re-render on save)** | Re-renders on every save of the view. |
+| **Init (create preview settings)** | Gives the view its own settings: detects what it would preview with and writes it to a `.tui.json` sidecar or a `// @tuipreview` line at the top of the view. See below. |
 | **Show Log** | Opens the **TUI Preview** output channel (see Troubleshooting). |
 | **Stop All** | Kills every preview terminal this extension opened. |
 
@@ -100,6 +101,24 @@ Precedence, highest first: an explicit `--class` on the command line → the ann
 sidecar → the `tuiLivePreview.*` settings → what the file declares.
 
 An unknown key or a bad value is reported in the log and ignored; it never stops a preview.
+When the annotation overrides a value the sidecar states differently, the preview says so with a
+warning — in VS Code, in the tool's output and in the interactive log pane — because otherwise
+the sidecar loses without a word.
+
+### Starting one: **Init**
+
+**TUI Preview: Init** detects what the view would preview with today — the class, and the width
+and height — and asks where to write it down:
+
+- **Sidecar** creates `MyView.tui.json`, with the optional keys (`extra`, `reference`, `clipath`)
+  as commented-out examples.
+- **Annotation in the view** adds a `// @tuipreview class=... width=... height=...` line at the
+  top of the `.tui.cs`. It is an ordinary edit, so it can be undone.
+
+Writing the values down changes nothing about how the view renders; it pins it. Init only writes
+what the view does not already state, so choosing the annotation for a view with a sidecar adds
+just the missing keys rather than shadowing the sidecar's. It never overwrites: an existing
+sidecar or annotation is opened instead.
 
 ## The class name is inferred
 

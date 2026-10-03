@@ -24,6 +24,14 @@ internal sealed partial class ViewSettings
   private readonly List<string> _references = new();
   private readonly List<string> _warnings = new();
 
+  /// <summary>
+  /// Which file last stated each single-valued key, and what it said. Kept so an annotation that
+  /// overrides the sidecar can say so: the sidecar is read first and silently losing one of its
+  /// values to a comment in the view is otherwise invisible.
+  /// </summary>
+  private readonly Dictionary<string, (string Value, string Origin)> _stated =
+    new(StringComparer.OrdinalIgnoreCase);
+
   /// <summary>The fully qualified class to instantiate, or null to leave it to the command line.</summary>
   public string? Class { get; private set; }
 
@@ -255,6 +263,8 @@ internal sealed partial class ViewSettings
       return;
     }
 
+    NoteOverride(key, value, origin);
+
     switch (key.ToLowerInvariant())
     {
       case "class":
@@ -306,6 +316,36 @@ internal sealed partial class ViewSettings
         _warnings.Add($"{origin}: unknown key \"{key}\"; ignoring it.");
         break;
     }
+  }
+
+  /// <summary>
+  /// Warns when a single-valued key is stated again by a different file with a different value,
+  /// which in practice is the annotation overriding the sidecar. Lists (extra, reference) add up
+  /// rather than override, so there is nothing to lose and nothing to warn about.
+  /// </summary>
+  private void NoteOverride(string key, string value, string origin)
+  {
+    if (key.ToLowerInvariant() is not ("class" or "width" or "height" or "clipath"))
+    {
+      return;
+    }
+
+    // An invalid size is reported by Apply and never takes effect, so it overrides nothing.
+    if (key.ToLowerInvariant() is "width" or "height" && !(int.TryParse(value, out int size) && size > 0))
+    {
+      return;
+    }
+
+    if (_stated.TryGetValue(key, out var earlier)
+      && earlier.Origin != origin
+      && !string.Equals(earlier.Value, value, StringComparison.Ordinal))
+    {
+      _warnings.Add(
+        $"{origin}: \"{key.ToLowerInvariant()}\" = \"{value}\" overrides \"{earlier.Value}\" " +
+        $"from {earlier.Origin}.");
+    }
+
+    _stated[key] = (value, origin);
   }
 
   /// <summary>A relative path in a view's settings is relative to that view.</summary>

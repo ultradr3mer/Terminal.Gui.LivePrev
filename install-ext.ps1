@@ -39,6 +39,9 @@
     associated with, because `code --install-extension` otherwise installs into the default
     profile, which a window running another profile never sees.
 
+    Needs the .NET 10 SDK, Node.js 22 or later (for @vscode/vsce), and VS Code's `code`
+    command on PATH.
+
 .EXAMPLE
     .\install-ext.ps1
 
@@ -135,14 +138,15 @@ if ($Pack) {
 }
 
 # --- 2. dependencies, so a fresh clone works without a separate npm install ---
-if (-not (Test-Path (Join-Path $extDir 'node_modules'))) {
-    Write-Step 'installing npm dependencies (first run only)'
-    Push-Location $extDir
-    try {
-        & npm install --no-audit --no-fund
-        if ($LASTEXITCODE -ne 0) { Fail 'npm install failed' }
-    } finally { Pop-Location }
-}
+# Every run, not only when node_modules is missing: a dependency added since the last run
+# (vsce, say) would otherwise never arrive in an existing checkout. npm install is a quick
+# no-op when nothing changed.
+Write-Step 'installing npm dependencies'
+Push-Location $extDir
+try {
+    & npm install --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { Fail 'npm install failed' }
+} finally { Pop-Location }
 
 # --- 3. the tests, before packaging rather than after ---
 if ($SkipTests) {
@@ -169,9 +173,11 @@ if ($Dev) {
 Write-Step 'packaging the VSIX'
 Push-Location $extDir
 try {
-    # --allow-missing-repository: package.json has no `repository` field, which vsce treats
-    # as an error. --no-git-tag-version: there are no release tags.
-    & npx vsce package --no-git-tag-version --allow-missing-repository
+    # The "package" script runs the vsce from devDependencies (@vscode/vsce). `npx vsce` would
+    # instead fetch the unscoped `vsce` package, which is the deprecated old name, and ask
+    # before downloading it. The script holds the flags: --allow-missing-repository because
+    # package.json has no `repository` field, --no-git-tag-version because there are no tags.
+    & npm run package
     if ($LASTEXITCODE -ne 0) { Fail 'vsce package failed' }
 
     $vsix = Get-ChildItem *.vsix | Sort-Object LastWriteTime -Descending | Select-Object -First 1

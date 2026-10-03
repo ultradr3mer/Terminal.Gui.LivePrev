@@ -37,6 +37,11 @@
         "category": "TUI Preview"
       },
       {
+        "command": "tuiLivePreview.init",
+        "title": "Init (create preview settings)",
+        "category": "TUI Preview"
+      },
+      {
         "command": "tuiLivePreview.stopAll",
         "title": "Stop All",
         "category": "TUI Preview"
@@ -63,6 +68,11 @@
           "command": "tuiLivePreview.watch",
           "when": "resourceFilename =~ /\\.tui\\.cs$/",
           "group": "7_modification@3"
+        },
+        {
+          "command": "tuiLivePreview.init",
+          "when": "resourceFilename =~ /\\.tui\\.cs$/",
+          "group": "7_modification@4"
         }
       ],
       "editor/context": [
@@ -80,6 +90,11 @@
           "command": "tuiLivePreview.watch",
           "when": "resourceFilename =~ /\\.tui\\.cs$/",
           "group": "7_modification@3"
+        },
+        {
+          "command": "tuiLivePreview.init",
+          "when": "resourceFilename =~ /\\.tui\\.cs$/",
+          "group": "7_modification@4"
         }
       ],
       "commandPalette": [
@@ -93,6 +108,10 @@
         },
         {
           "command": "tuiLivePreview.interactive",
+          "when": "resourceFilename =~ /\\.tui\\.cs$/"
+        },
+        {
+          "command": "tuiLivePreview.init",
           "when": "resourceFilename =~ /\\.tui\\.cs$/"
         }
       ]
@@ -143,11 +162,12 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node test/extension.test.js",
-    "package": "vsce package"
+    "package": "vsce package --no-git-tag-version --allow-missing-repository"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^4.0.0",
     "typescript": "^5.4.0"
   }
 }
