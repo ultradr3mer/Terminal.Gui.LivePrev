@@ -12,11 +12,31 @@ The preview follows TerminalGuiDesigner (`src/FromCode/CodeToView.cs`; a local c
 
 The preview compiles only the `.tui.cs`, adding a stub `public X() { InitializeComponent(); }` when the class has an `InitializeComponent()` and no parameterless constructor of its own. Because a view needs nothing from its app, the preview is a standalone tool: the app gets no package reference, and nothing is built before previewing.
 
+## Settings a view carries
+
+Per-view settings live with the view, not in the editor settings, because a view is the only thing that knows its own class name and its own helpers. Two sources, annotation first:
+
+- **`// @tuipreview key=value ...`** in the `.tui.cs` — `class`, `width`, `height`, `extra`, `reference`, `clipath`. Repeatable, several keys per line, values quotable.
+- **`MyView.tui.json`**, named after the view. Same keys as JSON, tolerating `//` comments and trailing commas.
+
+`extra`, `reference` and `clipath` paths are relative to the view. A bad value or an unknown key is logged and ignored, never fatal.
+
+`reference` is **additive**: `DefaultReferences()` always yields the framework, Terminal.Gui and TuiControls first, then the requested assemblies, so a view written against a third-party control library keeps all of them. A directory is expanded to the `*.dll` inside it. Those assemblies are also hooked into the preview's `AssemblyLoadContext` via `Resolving` — referenced by the compiler is not the same as loadable at runtime, and without the hook the view compiles cleanly and then throws `FileNotFoundException` on the first line touching a type from it.
+
+`clipath` is read only by the extension: the tool cannot act on it, since it *is* the tool. It outranks the `tuiLivePreview.cliPath` setting, which is the folder-wide default.
+
+The annotation outranks the sidecar because it is what the author is looking at, and because a sidecar cannot describe an unsaved buffer: the extension reads settings from the open document's text, so an annotation typed but not yet saved is the one that applies.
+
+Full chain for `--class`: explicit flag → annotation → sidecar → `tuiLivePreview.className` → inferred from the file → prompt. `--width`/`--height` are `int?` rather than defaulting to 80/24 precisely so "unset" is distinguishable and a view's own size can win.
+
+Both sides implement this, deliberately: `cli/ViewSettings.cs` (with `InferClassName`) and `readViewSettings()` in `src/extension.ts`. The extension re-reads them so it can pass explicit flags and name a bad `extra` file itself, in a message that can say which setting asked for it.
+
 ## The parts
 
 1. **`cli/` – the `tuipreview` tool** (`TuiPreview.Cli.csproj`, net10.0, Terminal.Gui `[2.5.0,2.6)`, Roslyn), packed as a dotnet tool.
-   - `Options.cs` defines the command-line contract (`--view`, `--class`, `--interactive`, `--watch`, `--extra`, `--display-name`, `--width/--height`, hidden test flags `--ui-snapshot`/`--ui-flood`).
-   - `Preview/RenderPipeline.cs` compiles in memory and renders. `DefaultReferences()` is the reference set: the shared framework, Terminal.Gui and TuiControls. It is meant to become configurable, and that method is the place to append to. Anything else in a `.tui.cs` fails with CS0246, which is intended.
+   - `Options.cs` defines the command-line contract (`--view`, `--class`, `--interactive`, `--watch`, `--extra`, `--reference`, `--display-name`, `--width/--height`, hidden test flags `--ui-snapshot`/`--ui-flood`). `--class` is optional: the view may state it, and the tool infers it as a last resort.
+   - `Preview/RenderPipeline.cs` compiles in memory and renders. `DefaultReferences()` is the reference set: the shared framework, Terminal.Gui and TuiControls, plus anything `--reference` adds. Anything else in a `.tui.cs` fails with CS0246, which is intended.
+   - `ResolvedPreview.cs` is the resolved value handed from option parsing to the render, so the two halves cannot disagree about which class, files or references are in play.
    - `Views/` contains the preview chrome (log pane plus splitter). `PreviewChrome.tui.cs`/`PreviewChrome.cs` follow the same split and can be previewed themselves.
 2. **`controls/TuiControls/`**: Terminal.Gui controls that views may use (the `Splitter` so far). It is referenced by the tool and packed on its own, so it can grow into a control library.
 3. **`vscode-extension/`**: adds "TUI Preview" commands (Interactive, Render Once, Watch) to the explorer and editor context menus for `*.tui.cs` files. It runs the tool on the view and mirrors unsaved buffers to a scratch file so previews stay live. Almost all of the logic is in `src/extension.ts`.

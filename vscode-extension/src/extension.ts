@@ -29,6 +29,38 @@ interface Resolved {
      * editor holds unsaved changes, because the tool can only read from disk.
      */
     previewPath: string;
+
+    /** Further .cs files to compile with the view, from the view's own settings. */
+    extraFiles: string[];
+
+    /** Assemblies to add to the tool's default reference set. */
+    references: string[];
+
+    /** The size the view asked for, so `launch` can prefer it over the workspace-wide setting. */
+    width?: number;
+    height?: number;
+}
+
+/**
+ * Preview settings a view states for itself, gathered from the two places it can put them.
+ *
+ * The tool understands both as well, and it re-reads them itself; this exists so the extension
+ * can report the effective values and pass `--class` explicitly, and so a view's `extra` files
+ * can be shown and validated before anything is launched.
+ */
+interface ViewSettings {
+    className?: string;
+    width?: number;
+    height?: number;
+    extra: string[];
+
+    /** Assemblies to add to the tool's default reference set. */
+    references: string[];
+
+    /** Where to find the tuipreview tool for this view. */
+    cliPath?: string;
+
+    warnings: string[];
 }
 
 /**
@@ -59,7 +91,7 @@ function logLine(message: string): void {
  * Surfaced in the status bar and the log so "command not found" is never a mystery: a
  * stale host runs old code while VS Code shows the new menu entries from package.json.
  */
-const BUILD = "2026-09-28.4";
+const BUILD = "2026-10-03.1";
 
 /** Shows which build is live, so a stale Extension Development Host is immediately visible. */
 let status: vscode.StatusBarItem | undefined;
@@ -140,8 +172,10 @@ async function launch(mode: Mode, picked?: vscode.Uri): Promise<void> {
         extra.push("--interactive");
     } else {
         // Width/height only apply to the printed render; interactive fills the terminal.
-        extra.push("--width", String(cfg.get<number>("width", 80)));
-        extra.push("--height", String(cfg.get<number>("height", 24)));
+        // A view's own size wins over the setting, so one wide view does not make every
+        // other preview in the workspace wide too.
+        extra.push("--width", String(resolved.width ?? cfg.get<number>("width", 80)));
+        extra.push("--height", String(resolved.height ?? cfg.get<number>("height", 24)));
     }
 
     const label =
@@ -202,18 +236,54 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         );
     }
 
-    const className = await resolveClassName(view);
-    const launcher = resolveLauncher();
+    // The open document's text, when there is one. Settings are read from this rather than from
+    // disk so that an annotation the user has just typed but not saved is the one that applies.
+    const openDoc = vscode.workspace.textDocuments.find(
+        (d) => d.uri.scheme === "file" && d.uri.fsPath === view
+    );
+
+    let text: string;
+    try {
+        text = openDoc?.getText() ?? fs.readFileSync(view, "utf8");
+    } catch (err) {
+        throw new Error(`Could not read ${path.basename(view)}: ${String(err)}`);
+    }
+
+    const settings = readViewSettings(view, text);
+    for (const warning of settings.warnings) {
+        logLine(`view settings: ${warning}`);
+    }
+
+    // Reported here rather than left to the tool's file check, which cannot say which of the
+    // view's own settings asked for the file that is missing.
+    for (const file of settings.extra) {
+        if (!fs.existsSync(file)) {
+            throw new Error(
+                `${path.basename(view)} lists an extra file that does not exist: ${file}. ` +
+                `Check its "extra" annotation or .tui.json.`
+            );
+        }
+    }
+
+    // A reference may be a dll or a directory of them, so both are accepted; anything else is a
+    // typo that would otherwise preview a view that cannot compile.
+    for (const reference of settings.references) {
+        if (!fs.existsSync(reference)) {
+            throw new Error(
+                `${path.basename(view)} lists a reference that does not exist: ${reference}. ` +
+                `Check its "reference" annotation or .tui.json.`
+            );
+        }
+    }
+
+    const className = await resolveClassName(view, settings);
+    const launcher = resolveLauncher(view, settings);
 
     // Whether to mirror the editor buffer rather than trusting what is on disk. Off means the
     // preview always reflects the last save, which is what you want from a scripted render and
     // what makes the output reproducible.
     const cfg = vscode.workspace.getConfiguration("tuiLivePreview");
     const live = cfg.get<boolean>("live", true);
-
-    const openDoc = vscode.workspace.textDocuments.find(
-        (d) => d.uri.scheme === "file" && d.uri.fsPath === view
-    );
 
     let previewPath = view;
     if (openDoc && live) {
@@ -228,7 +298,10 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
     logLine(
         `resolved: view=${view} class=${className} ` +
         `launcher=${describeLauncher(launcher)}` +
-        (previewPath === view ? "" : ` preview=${previewPath}`)
+        (previewPath === view ? "" : ` preview=${previewPath}`) +
+        (settings.extra.length > 0 ? ` extra=${settings.extra.join(",")}` : "") +
+        (settings.references.length > 0 ? ` refs=${settings.references.join(",")}` : "") +
+        (settings.cliPath ? ` cliPath=${settings.cliPath}` : "")
     );
 
     return {
@@ -236,6 +309,10 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         view,
         className,
         previewPath,
+        extraFiles: settings.extra,
+        references: settings.references,
+        width: settings.width,
+        height: settings.height,
     };
 }
 
@@ -307,13 +384,282 @@ function findViewFile(root: string, depth = 4): string | undefined {
 }
 
 /**
+ * Reads the settings a view states about itself.
+ *
+ * Two sources, in increasing order of precedence:
+ *   1. a sidecar `MyView.tui.json` next to the view,
+ *   2. a `// @tuipreview key=value ...` annotation in the view.
+ *
+ * The annotation wins because it is what the author is looking at, and because a sidecar cannot
+ * describe an unsaved buffer: a dirty editor buffer and its stale neighbour would disagree, and
+ * the buffer is the thing the user is actually looking at.
+ *
+ * `text` is passed in rather than read here because the live buffer may not be on disk yet, and
+ * reading the file would silently preview settings the user had just edited away from.
+ *
+ * Bad values are collected as warnings rather than thrown. A typo in an annotation must not stop
+ * a preview that is otherwise fine, and the warning names the file so it can be found again.
+ */
+function readViewSettings(view: string, text: string): ViewSettings {
+    const settings: ViewSettings = { extra: [], references: [], warnings: [] };
+    const baseDir = path.dirname(view);
+
+    // A sidecar is optional and its absence is not a problem, so a read failure of any kind is
+    // simply "no settings over here".
+    const sidecar = view.replace(/\.tui\.cs$/, ".tui.json");
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(stripJsonComments(fs.readFileSync(sidecar, "utf8")));
+    } catch {
+        parsed = undefined;
+    }
+
+    if (parsed !== undefined) {
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+            settings.warnings.push(`${path.basename(sidecar)} must hold a JSON object; ignoring it.`);
+        } else {
+            applyJson(settings, parsed as Record<string, unknown>, baseDir, path.basename(sidecar));
+        }
+    }
+
+    applyAnnotation(settings, text, baseDir, path.basename(view));
+
+    return settings;
+}
+
+/** Applies one parsed source, validating each key and reporting the ones that are not usable. */
+function applyJson(
+    settings: ViewSettings,
+    source: Record<string, unknown>,
+    baseDir: string,
+    origin: string
+): void {
+    for (const [key, value] of Object.entries(source)) {
+        switch (key) {
+            case "class":
+                if (typeof value === "string") {
+                    settings.className = value.trim();
+                }
+                break;
+
+            case "clipath":
+                if (typeof value === "string" && value.trim().length > 0) {
+                    settings.cliPath = path.resolve(baseDir, value.trim());
+                }
+                break;
+
+            case "width":
+            case "height": {
+                const size = positiveInt(value);
+                if (size === undefined) {
+                    settings.warnings.push(`${origin}: "${key}" must be a positive whole number.`);
+                    break;
+                }
+
+                if (key === "width") {
+                    settings.width = size;
+                } else {
+                    settings.height = size;
+                }
+
+                break;
+            }
+
+            case "extra":
+                // A bare string as well as an array: a single extra file is the common case and an
+                // array of one is noise.
+                for (const entry of Array.isArray(value) ? value : [value]) {
+                    if (typeof entry === "string" && entry.trim().length > 0) {
+                        settings.extra.push(path.resolve(baseDir, entry.trim()));
+                    }
+                }
+
+                break;
+
+            case "reference":
+                // Resolved too, because the tool takes absolute paths and the extension has to
+                // report a bad one before anything is launched.
+                for (const entry of Array.isArray(value) ? value : [value]) {
+                    if (typeof entry === "string" && entry.trim().length > 0) {
+                        settings.references.push(path.resolve(baseDir, entry.trim()));
+                    }
+                }
+
+                break;
+
+            default:
+                settings.warnings.push(`${origin}: unknown key "${key}"; ignoring it.`);
+                break;
+        }
+    }
+}
+
+/**
+ * The annotation grammar: `// @tuipreview` then `key=value` pairs, which may be repeated on
+ * several lines. A value may be double-quoted to carry spaces, and an unquoted value ends at
+ * whitespace or a separator so several pairs fit on one line.
+ *
+ * Only line comments count. The view is C#, and a block comment wrapping preview configuration
+ * is not something anyone writes.
+ */
+const ANNOTATION = /^[ \t]*\/\/[ \t]*@tuipreview\b(?<args>[^\n]*)/gm;
+const PAIR = /(?<key>[A-Za-z_][\w-]*)[ \t]*=[ \t]*(?:"(?<quoted>[^"]*)"|(?<bare>[^\s,;]+))/g;
+
+function applyAnnotation(
+    settings: ViewSettings,
+    text: string,
+    baseDir: string,
+    origin: string
+): void {
+    for (const line of text.matchAll(ANNOTATION)) {
+        const args = line.groups?.args ?? "";
+        for (const pair of args.matchAll(PAIR)) {
+            const key = pair.groups!.key;
+            const lower = key.toLowerCase();
+            const value = (pair.groups!.quoted ?? pair.groups!.bare).trim();
+
+            if (value.length === 0) {
+                settings.warnings.push(`${origin}: "${key}" has no value; ignoring it.`);
+                continue;
+            }
+
+            if (lower === "class") {
+                settings.className = value;
+                continue;
+            }
+
+            if (lower === "clipath") {
+                settings.cliPath = path.resolve(baseDir, value);
+                continue;
+            }
+
+            if (lower === "extra") {
+                // Relative to the view, not to the process: a workspace-relative path is
+                // meaningless in whatever directory the terminal happened to open in.
+                settings.extra.push(path.resolve(baseDir, value));
+                continue;
+            }
+
+            if (lower === "reference") {
+                settings.references.push(path.resolve(baseDir, value));
+                continue;
+            }
+
+            if (lower === "width" || lower === "height") {
+                const size = positiveInt(value);
+                if (size === undefined) {
+                    settings.warnings.push(
+                        `${origin}: "${key}" must be a positive whole number, got "${value}".`
+                    );
+                    continue;
+                }
+
+                if (lower === "width") {
+                    settings.width = size;
+                } else {
+                    settings.height = size;
+                }
+
+                continue;
+            }
+
+            settings.warnings.push(`${origin}: unknown key "${key}"; ignoring it.`);
+        }
+    }
+}
+
+/** A positive whole number, or undefined. Rejects "80px", 80.5 and 0 alike. */
+function positiveInt(value: unknown): number | undefined {
+    if (typeof value === "string" && !/^\d+$/.test(value.trim())) {
+        return undefined;
+    }
+
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * Makes a sidecar tolerant of the two things people write in JSON that is really C#-adjacent
+ * configuration: `//` comments and a trailing comma. Both are what a hand-edited file ends up
+ * with, and refusing to preview because of one would be needlessly brittle.
+ *
+ * Done as a single pass over strings and comments, because doing it as two independent replaces
+ * corrupts a file whose *values* contain the other construct -- a path like "https://x" or an
+ * escape inside a string. A single alternation only ever rewrites the construct it is inside.
+ */
+function stripJsonComments(text: string): string {
+    let out = "";
+    let index = 0;
+
+    while (index < text.length) {
+        const char = text[index];
+
+        if (char === '"') {
+            // Copy the string verbatim, honouring backslash escapes so an escaped quote does
+            // not end it early.
+            let end = index + 1;
+            while (end < text.length) {
+                if (text[end] === "\\") {
+                    end += 2;
+                    continue;
+                }
+
+                if (text[end] === '"') {
+                    end++;
+                    break;
+                }
+
+                end++;
+            }
+
+            out += text.slice(index, end);
+            index = end;
+            continue;
+        }
+
+        if (char === "/" && text[index + 1] === "/") {
+            while (index < text.length && text[index] !== "\n") {
+                index++;
+            }
+
+            continue;
+        }
+
+        if (char === "/" && text[index + 1] === "*") {
+            const close = text.indexOf("*/", index + 2);
+            index = close === -1 ? text.length : close + 2;
+            continue;
+        }
+
+        // A comma directly before a closing brace or bracket is a trailing comma.
+        if (char === ",") {
+            const rest = text.slice(index + 1);
+            if (/^\s*[}\]]/.test(rest)) {
+                index++;
+                continue;
+            }
+        }
+
+        out += char;
+        index++;
+    }
+
+    return out;
+}
+
+/**
  * Determines the `--class` value.
  *
  * The tool requires it and will not infer it, so this is the friction the context menu exists
- * to remove: read the namespace and class declaration out of the file, and only ask when that
- * yields nothing.
+ * to remove: take the class the view declares for itself, else read the namespace and class
+ * declaration out of the file, and only ask when that yields nothing.
  */
-async function resolveClassName(file: string): Promise<string> {
+async function resolveClassName(file: string, settings: ViewSettings): Promise<string> {
+    if (settings.className) {
+        logLine(`class from the view's own settings: ${settings.className}`);
+        return settings.className;
+    }
+
     const override = vscode.workspace
         .getConfiguration("tuiLivePreview")
         .get<string>("className", "")
@@ -401,8 +747,12 @@ function readClassFromCSharp(file: string): string | undefined {
 /**
  * Finds how to run the `tuipreview` tool.
  *
- * Preference order: explicit setting, then a build in the workspace, then `dotnet run` on the
- * tool's project, then the copy bundled with the extension, then the dotnet tool on PATH.
+ * Preference order: the view's own `cliPath`, then the `tuiLivePreview.cliPath` setting, then a
+ * build in the workspace, then `dotnet run` on the tool's project, then the copy bundled with the
+ * extension, then the dotnet tool on PATH.
+ *
+ * A view's own path comes first because it is the more specific claim: a view that names its
+ * tool is saying "preview me with this", not "use whatever the workspace defaults to".
  *
  * A workspace build wins over the bundled copy so that someone working on the tool previews
  * with their own changes. Everyone else has no `cli/` in their workspace and gets the bundled
@@ -413,13 +763,23 @@ function readClassFromCSharp(file: string): string | undefined {
  * The view's own project is never built. A `.tui.cs` depends on nothing but Terminal.Gui and
  * TuiControls, which the tool ships itself.
  */
-function resolveLauncher(): Launcher {
+function resolveLauncher(view: string, settings?: ViewSettings): Launcher {
     const cfg = vscode.workspace.getConfiguration("tuiLivePreview");
-    const configured = cfg.get<string>("cliPath", "").trim();
+
+    // The view's own cliPath outranks the workspace setting: a view that names its tool is
+    // saying "preview me with this", which is a more specific claim than a folder-wide default.
+    // It is honoured whether or not the setting is present.
+    const configured = (settings?.cliPath ?? cfg.get<string>("cliPath", "")).trim();
 
     if (configured) {
         if (!fs.existsSync(configured)) {
-            throw new Error(`tuiLivePreview.cliPath does not exist: ${configured}`);
+            // Named differently depending on where it came from, because the fix differs: a
+            // wrong setting is edited in settings.json, a wrong annotation in the view.
+            throw new Error(
+                settings?.cliPath
+                    ? `${path.basename(view)} names a cliPath that does not exist: ${configured}`
+                    : `tuiLivePreview.cliPath does not exist: ${configured}`
+            );
         }
         return launcherFor(configured);
     }
@@ -567,6 +927,23 @@ function commandLine(resolved: Resolved, extra: string[]): string {
         ...(resolved.previewPath === resolved.view
             ? []
             : ["--display-name", quote(resolved.view)]),
+        // Layout-only helpers the view names for itself. Passed explicitly rather than left to the
+        // tool so that the resolved command in the log is the whole truth about what was compiled,
+        // and so a missing file is reported by the extension, which can name the setting.
+        ...(resolved.extraFiles.length > 0
+            ? [
+                "--extra",
+                ...resolved.extraFiles.map((f) => quote(f)),
+            ]
+            : []),
+        // Additive: the tool always includes the framework, Terminal.Gui and TuiControls, so a
+        // view written against a third-party control library keeps all of them.
+        ...(resolved.references.length > 0
+            ? [
+                "--reference",
+                ...resolved.references.map((f) => quote(f)),
+            ]
+            : []),
         ...extra,
     ].join(" ");
 }

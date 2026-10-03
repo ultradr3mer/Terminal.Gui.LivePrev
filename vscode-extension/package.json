@@ -108,17 +108,17 @@
         "tuiLivePreview.className": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Override for the `--class` argument. When empty, it is read from the namespace and class declaration of the `.tui.cs` being previewed, and you are only prompted if none is found."
+          "markdownDescription": "Override for the `--class` argument. When empty, the class comes from the view's own settings — a `// @tuipreview class=...` annotation or a `.tui.json` sidecar — and failing that from the namespace and class declaration of the `.tui.cs` itself. You are only prompted if none of those yield anything."
         },
         "tuiLivePreview.width": {
           "type": "number",
           "default": 80,
-          "description": "Render width in columns. Ignored in interactive mode, which fills the terminal."
+          "description": "Default render width in columns. Ignored in interactive mode, which fills the terminal, and overridden by a `width` in the view's own settings."
         },
         "tuiLivePreview.height": {
           "type": "number",
           "default": 24,
-          "description": "Render height in rows. Ignored in interactive mode, which fills the terminal."
+          "description": "Default render height in rows. Ignored in interactive mode, which fills the terminal, and overridden by a `height` in the view's own settings."
         },
         "tuiLivePreview.ansi": {
           "type": "boolean",

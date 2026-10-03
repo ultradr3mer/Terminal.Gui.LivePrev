@@ -760,6 +760,309 @@ async function classNameTests() {
     return root;
 }
 
+/**
+ * Settings a view states for itself: a `// @tuipreview` annotation and a `.tui.json` sidecar.
+ *
+ * These matter because everything else in the extension is one global bag for the whole
+ * workspace. A view is the only thing that knows its own class name and which layout helpers it
+ * needs, so both belong with the view. The two cases worth guarding hardest are precedence
+ * (the annotation must beat the sidecar) and the dirty buffer (an unsaved annotation is the one
+ * the user is looking at, and must not be read off disk).
+ *
+ * Each preview is awaited before the assertions that read it: `test` runs its callback
+ * synchronously, and a promise returned from one would settle after the suite had moved on.
+ */
+async function viewSettingsTests() {
+    const h = module.exports;
+    const root = h.makeWorkspace();
+    h.setWorkspace(root);
+    vscode.__state._commands = {};
+    h.ext.activate({ subscriptions: [] });
+
+    console.log("@tuipreview annotations");
+
+    const annotated = h.writeView(
+        root,
+        "Annotated.tui.cs",
+        "// @tuipreview class=Other.Declared width=64 height=12\n" +
+            h.layoutHalf("Demo", "Annotated")
+    );
+    h.edit(annotated);
+    const annLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("an annotation supplies the class, with no prompt", () => {
+        h.assert.ok(annLine.includes('--class "Other.Declared"'), annLine);
+    });
+
+    h.test("the annotation beats the class the file declares", () => {
+        // The point of declaring it: the file declares Demo.Annotated and the annotation says
+        // something else. If inference won, the annotation would not be a setting at all.
+        h.assert.ok(!annLine.includes('--class "Demo.Annotated"'), annLine);
+    });
+
+    h.test("an annotation supplies the render size", () => {
+        h.assert.ok(annLine.includes("--width 64"), annLine);
+        h.assert.ok(annLine.includes("--height 12"), annLine);
+    });
+
+    console.log("@tuipreview extras");
+
+    h.writeView(root, "helpers/Layout.cs", "namespace Demo { }");
+    const withExtra = h.writeView(
+        root,
+        "WithExtra.tui.cs",
+        "// @tuipreview class=Demo.WithExtra extra=helpers/Layout.cs\n" +
+            h.layoutHalf("Demo", "WithExtra")
+    );
+    h.edit(withExtra);
+    const extraLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("an extra file is compiled with the view", () => {
+        h.assert.ok(extraLine.includes("--extra"), extraLine);
+    });
+
+    h.test("an extra path is resolved against the view, not the cwd", () => {
+        h.assert.ok(
+            extraLine.includes(`"${path.join(root, "tests", "helpers", "Layout.cs")}"`),
+            extraLine
+        );
+    });
+
+    const spaced = h.writeView(root, "Helpers With Space.cs", "namespace Demo { }");
+    const quoted = h.writeView(
+        root,
+        "Quoted.tui.cs",
+        `// @tuipreview class=Demo.Quoted extra="${path.basename(spaced)}"\n` +
+            h.layoutHalf("Demo", "Quoted")
+    );
+    h.edit(quoted);
+    const quotedLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a quoted value may contain spaces", () => {
+        h.assert.ok(quotedLine.includes(`"${spaced}"`), quotedLine);
+    });
+
+    const missing = h.writeView(
+        root,
+        "BadExtra.tui.cs",
+        "// @tuipreview class=Demo.Bad extra=Nope.cs\n" + h.layoutHalf("Demo", "Bad")
+    );
+    h.edit(missing);
+    const missingMessage = await h.runExpectingError("tuiLivePreview.render");
+
+    h.test("a missing extra file is reported before anything is launched", () => {
+        h.assert.ok(
+            missingMessage && missingMessage.includes("Nope.cs"),
+            `expected the missing file to be named: ${missingMessage}`
+        );
+    });
+
+    console.log("sidecar .tui.json");
+
+    const sidecarView = h.writeView(root, "Sidecar.tui.cs", h.layoutHalf("Demo", "Sidecar"));
+    fs.writeFileSync(
+        path.join(root, "tests", "Sidecar.tui.json"),
+        JSON.stringify({ class: "Demo.FromSidecar", width: 40, height: 10 })
+    );
+    h.edit(sidecarView);
+    const sideLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a sidecar supplies the class", () => {
+        h.assert.ok(sideLine.includes('--class "Demo.FromSidecar"'), sideLine);
+    });
+
+    h.test("a sidecar supplies the render size", () => {
+        h.assert.ok(sideLine.includes("--width 40"), sideLine);
+        h.assert.ok(sideLine.includes("--height 10"), sideLine);
+    });
+
+    const commented = h.writeView(root, "Commented.tui.cs", h.layoutHalf("Demo", "Commented"));
+    fs.writeFileSync(
+        path.join(root, "tests", "Commented.tui.json"),
+        '{\n  // only this wide\n  "class": "Demo.Commented", "width": 50,\n}\n'
+    );
+    h.edit(commented);
+    const commentedLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a sidecar may carry comments and trailing commas", () => {
+        h.assert.ok(commentedLine.includes('--class "Demo.Commented"'), commentedLine);
+        h.assert.ok(commentedLine.includes("--width 50"), commentedLine);
+    });
+
+    console.log("annotation vs sidecar");
+
+    const both = h.writeView(
+        root,
+        "Both.tui.cs",
+        "// @tuipreview class=Demo.FromAnnotation width=70\n" + h.layoutHalf("Demo", "Both")
+    );
+    fs.writeFileSync(
+        path.join(root, "tests", "Both.tui.json"),
+        JSON.stringify({ class: "Demo.FromSidecar", width: 40 })
+    );
+    h.edit(both);
+    const bothLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("the annotation overrides the sidecar", () => {
+        h.assert.ok(bothLine.includes('--class "Demo.FromAnnotation"'), bothLine);
+        h.assert.ok(bothLine.includes("--width 70"), bothLine);
+        h.assert.ok(!bothLine.includes("--width 40"), `sidecar leaked through: ${bothLine}`);
+    });
+
+    const sideOnly = h.writeView(
+        root,
+        "SideOnly.tui.cs",
+        "// @tuipreview class=Demo.SideOnly\n" + h.layoutHalf("Demo", "SideOnly")
+    );
+    fs.writeFileSync(
+        path.join(root, "tests", "SideOnly.tui.json"),
+        JSON.stringify({ height: 33 })
+    );
+    h.edit(sideOnly);
+    const sideOnlyLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("the sidecar still supplies what the annotation omits", () => {
+        h.assert.ok(sideOnlyLine.includes("--height 33"), sideOnlyLine);
+        h.assert.ok(sideOnlyLine.includes('--class "Demo.SideOnly"'), sideOnlyLine);
+    });
+
+    console.log("@tuipreview references");
+
+    const lib = path.join(root, "lib", "ThirdParty.dll");
+    fs.mkdirSync(path.dirname(lib), { recursive: true });
+    fs.writeFileSync(lib, "MZ");
+    const refd = h.writeView(
+        root,
+        "Referenced.tui.cs",
+        "// @tuipreview class=Demo.Referenced reference=../lib/ThirdParty.dll\n" +
+            h.layoutHalf("Demo", "Referenced")
+    );
+    h.edit(refd);
+    const refLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a reference is passed to the tool", () => {
+        h.assert.ok(refLine.includes("--reference"), refLine);
+    });
+
+    h.test("a reference is resolved against the view", () => {
+        h.assert.ok(refLine.includes(`"${lib}"`), refLine);
+    });
+
+    const badRef = h.writeView(
+        root,
+        "BadRef.tui.cs",
+        "// @tuipreview class=Demo.BadRef reference=../lib/Nope.dll\n" +
+            h.layoutHalf("Demo", "BadRef")
+    );
+    h.edit(badRef);
+    const refMessage = await h.runExpectingError("tuiLivePreview.render");
+
+    h.test("a missing reference is reported before anything is launched", () => {
+        h.assert.ok(
+            refMessage && refMessage.includes("Nope.dll"),
+            `expected the missing reference to be named: ${refMessage}`
+        );
+    });
+
+    console.log("@tuipreview cliPath");
+
+    const localCli = path.join(root, "tools", "tuipreview.exe");
+    fs.mkdirSync(path.dirname(localCli), { recursive: true });
+    fs.writeFileSync(localCli, "MZ");
+    const withCli = h.writeView(
+        root,
+        "WithCli.tui.cs",
+        "// @tuipreview class=Demo.WithCli clipath=../tools/tuipreview.exe\n" +
+            h.layoutHalf("Demo", "WithCli")
+    );
+    h.edit(withCli);
+    const cliLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a view's cliPath selects the tool to run", () => {
+        // The workspace also has a built cli/bin copy, so this proves the view won rather than
+        // that some lookup happened to find the right thing.
+        h.assert.ok(cliLine.includes(localCli), cliLine);
+        h.assert.ok(
+            !cliLine.includes(path.join("cli", "bin")),
+            `the workspace build should have been overridden: ${cliLine}`
+        );
+    });
+
+    const otherCli = path.join(root, "tools", "other.exe");
+    fs.writeFileSync(otherCli, "MZ");
+    vscode.__state.configuration = { tuiLivePreview: { cliPath: otherCli } };
+    h.edit(withCli);
+    const settingLine = h.lastLine(await h.run("tuiLivePreview.render"));
+    vscode.__state.configuration = {};
+
+    h.test("a cliPath outranks the cliPath setting", () => {
+        h.assert.ok(settingLine.includes(localCli), `the view's path should win: ${settingLine}`);
+    });
+
+    const badCli = h.writeView(
+        root,
+        "BadCli.tui.cs",
+        "// @tuipreview class=Demo.BadCli clipath=../tools/Nope.exe\n" +
+            h.layoutHalf("Demo", "BadCli")
+    );
+    h.edit(badCli);
+    const cliMessage = await h.runExpectingError("tuiLivePreview.render");
+
+    h.test("a missing cliPath names the view, not the setting", () => {
+        // The fix differs by source: a wrong annotation is fixed in the view, a wrong setting in
+        // settings.json. Saying "tuiLivePreview.cliPath" for an annotation sends the user to the
+        // wrong file.
+        h.assert.ok(cliMessage && cliMessage.includes("BadCli.tui.cs"), cliMessage);
+        h.assert.ok(!cliMessage.includes("tuiLivePreview.cliPath"), cliMessage);
+    });
+
+    console.log("settings from an unsaved buffer");
+
+    const dirty = h.writeView(root, "Dirty.tui.cs", h.layoutHalf("Demo", "Dirty"));
+    vscode.__state.textDocuments = [
+        {
+            uri: vscode.Uri.file(dirty),
+            isDirty: true,
+            // The saved file says nothing, so reading settings from disk would silently fall
+            // back to inference and preview a different class than the one on screen.
+            getText: () =>
+                "// @tuipreview class=Demo.FromTheBuffer\n" + h.layoutHalf("Demo", "Dirty"),
+        },
+    ];
+    h.edit(dirty);
+    const dirtyLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("an unsaved annotation is the one that applies", () => {
+        h.assert.ok(dirtyLine.includes('--class "Demo.FromTheBuffer"'), dirtyLine);
+    });
+    vscode.__state.textDocuments = [];
+
+    console.log("bad settings do not stop a preview");
+
+    const typos = h.writeView(
+        root,
+        "Typos.tui.cs",
+        "// @tuipreview class=Demo.Typos widht=90 colour=red\n" + h.layoutHalf("Demo", "Typos")
+    );
+    h.edit(typos);
+    const typoLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a misspelled key is ignored, the good keys still apply", () => {
+        h.assert.ok(typoLine.includes('--class "Demo.Typos"'), typoLine);
+        h.assert.ok(!typoLine.includes("--width 90"), `a bad value leaked through: ${typoLine}`);
+    });
+
+    h.test("bad settings are logged rather than raised as errors", () => {
+        const lines = (vscode.window.channels ?? []).flatMap((c) => c.lines);
+        h.assert.ok(
+            lines.some((l) => l.includes("widht") && l.includes("unknown key")),
+            "expected the log to name the unknown key"
+        );
+    });
+
+    return root;
+}
+
 void main().then(async (root) => {
     fs.rmSync(root, { recursive: true, force: true });
 
@@ -776,6 +1079,9 @@ void main().then(async (root) => {
 
     const classRoot = await classNameTests();
     fs.rmSync(classRoot, { recursive: true, force: true });
+
+    const settingsRoot = await viewSettingsTests();
+    fs.rmSync(settingsRoot, { recursive: true, force: true });
 
     console.log(`\n${h.state.passed} passed, ${h.state.failed} failed`);
     process.exitCode = h.state.failed === 0 ? 0 : 1;

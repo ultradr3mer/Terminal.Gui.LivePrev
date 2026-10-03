@@ -79,8 +79,12 @@ internal static class RenderPipeline
     /// Further files compiled into the same assembly, against the same references: a layout
     /// split out of a large view, or a small control the view is being written alongside.
     /// </param>
+    /// <param name="extraReferences">
+    /// Assemblies added to <see cref="DefaultReferences"/>, for a view written against a control
+    /// library beyond Terminal.Gui and TuiControls. A dll, or a directory holding one.
+    /// </param>
     public static BuildResult BuildClass(string sourcePath, string className,
-        IReadOnlyList<string> extraSourcePaths)
+        IReadOnlyList<string> extraSourcePaths, IReadOnlyList<string>? extraReferences = null)
     {
         var parseOptions = new CSharpParseOptions(LanguageVersion.Latest);
         SyntaxTree view = CSharpSyntaxTree.ParseText(
@@ -104,7 +108,7 @@ internal static class RenderPipeline
             trees.Add(CSharpSyntaxTree.ParseText(stub, parseOptions, path: "TuiPreview.Constructor.g.cs"));
         }
 
-        return CompileAndInstantiate(trees, className);
+        return CompileAndInstantiate(trees, className, extraReferences);
     }
 
     /// <summary>
@@ -183,7 +187,7 @@ internal static class RenderPipeline
     /// <paramref name="className"/>.
     /// </summary>
     private static BuildResult CompileAndInstantiate(
-        List<SyntaxTree> trees, string className)
+        List<SyntaxTree> trees, string className, IReadOnlyList<string>? extraReferences)
     {
         var genDiags = ImmutableArray<Diagnostic>.Empty;
 
@@ -191,7 +195,7 @@ internal static class RenderPipeline
             // Fixed, so a diagnostic or a stack trace always names the preview the same way.
             assemblyName: "TuiPreview",
             syntaxTrees: trees,
-            references: DefaultReferences(),
+            references: DefaultReferences(extraReferences),
             options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
                 // Annotations: a view may write string? whether or not its project enables
                 // nullable, and the log is not flooded with flow warnings it would not get there.
@@ -221,9 +225,33 @@ internal static class RenderPipeline
         // isCollectible: the context is intentionally NOT unloaded before the view is disposed.
         // The interactive host swaps views in and out, and unloading under a live view would
         // fault. The context is left to the GC once the host itself goes away.
-        // Everything the view references is already loaded by the tool itself, so the default
-        // context resolves it and Terminal.Gui above all stays shared with the view.
+        // The default context resolves Terminal.Gui, TuiControls and the framework, which the
+        // tool has already loaded, so Terminal.Gui stays shared with the view.
         var alc = new AssemblyLoadContext("tui-preview", isCollectible: true);
+
+        // An assembly the view asked for through --reference is referenced by the compiler but
+        // loaded by nobody, and the default context only finds what the tool itself has loaded.
+        // Without this the view compiles cleanly and then throws FileNotFoundException on the
+        // first line that touches a type from that assembly, which reads like a bug in the view.
+        // Resolved from the same paths the compiler was given, so the two cannot disagree.
+        Dictionary<string, string> requested = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in ExpandReferences(extraReferences))
+        {
+            requested[Path.GetFileNameWithoutExtension(path)] = path;
+        }
+
+        if (requested.Count > 0)
+        {
+            alc.Resolving += (context, name) =>
+            {
+                // Only the assemblies the view asked for. Anything else is Terminal.Gui's own
+                // dependency graph, which the default context has already, so returning null
+                // defers to it rather than guessing at a path.
+                return requested.TryGetValue(name.Name ?? string.Empty, out string? path)
+                    ? context.LoadFromAssemblyPath(path)
+                    : null;
+            };
+        }
 
         Assembly asm = alc.LoadFromStream(peStream);
 
@@ -281,11 +309,13 @@ internal static class RenderPipeline
     /// reaches for anything else fails with CS0246 here instead of quietly dragging the app's
     /// dependencies into its layout.
     /// <para>
-    /// This is the default set, and the one place to append to when the references become
-    /// configurable (a <c>--reference</c> option, say, for a third-party control library).
+    /// This is the default set. Anything the view asks for through <c>--reference</c> is added
+    /// to it rather than replacing it, so a view written against a third-party control library
+    /// still has Terminal.Gui and TuiControls available.
     /// </para>
     /// </summary>
-    private static IEnumerable<MetadataReference> DefaultReferences()
+    private static IEnumerable<MetadataReference> DefaultReferences(
+        IReadOnlyList<string>? extraReferences = null)
     {
         // The framework only: the tool's own packages (Roslyn, CommandLineParser) are trusted
         // platform assemblies too, but they sit next to the tool, not in the runtime directory.
@@ -306,6 +336,48 @@ internal static class RenderPipeline
 
         yield return ReferenceFor(typeof(View).Assembly.Location);
         yield return ReferenceFor(typeof(TuiControls.Splitter).Assembly.Location);
+
+        // An assembly the view asked for beyond the default set. Emitted last so a duplicate of
+        // Terminal.Gui or TuiControls is shadowed by the copy the tool itself loaded: the view
+        // must bind to the same View type the tool instantiates it as, or the cast below fails.
+        foreach (string path in ExpandReferences(extraReferences))
+        {
+            yield return ReferenceFor(path);
+        }
+    }
+
+    /// <summary>
+    /// The assemblies named by <c>--reference</c>, resolved to files that exist.
+    /// <para>
+    /// A directory is expanded by taking the dlls inside it, because that is how a NuGet package
+    /// or a build output is normally pointed at. An empty or absent directory yields nothing
+    /// rather than an error: the caller has already reported the path it could not use, and a
+    /// second complaint here would only bury the first.
+    /// </para>
+    /// </summary>
+    private static IEnumerable<string> ExpandReferences(IReadOnlyList<string>? references)
+    {
+        foreach (string reference in references ?? Array.Empty<string>())
+        {
+            if (reference.Length == 0)
+            {
+                continue;
+            }
+
+            string full = Path.GetFullPath(reference);
+
+            if (Directory.Exists(full))
+            {
+                foreach (string dll in Directory.EnumerateFiles(full, "*.dll"))
+                {
+                    yield return dll;
+                }
+            }
+            else if (File.Exists(full))
+            {
+                yield return full;
+            }
+        }
     }
 
     /// <summary>References already read, keyed by path and invalidated by a changed file.</summary>

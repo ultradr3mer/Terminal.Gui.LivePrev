@@ -51,11 +51,61 @@ The preview compiles only the `.tui.cs` together with a stub constructor that ca
 `InitializeComponent()`, so what you see is the layout with its placeholder values. A
 self-contained `.tui.cs` that declares its own parameterless constructor is compiled as it is.
 
+## Settings a view carries with it
+
+Everything in the **Settings** section below is one bag for the whole workspace. A view that
+needs something different says so itself, in a `// @tuipreview` annotation:
+
+```csharp
+// @tuipreview class=SampleApp.MainView width=120 height=40 extra=Layout/Shared.tui.cs
+public sealed partial class MainView : Window { ... }
+```
+
+| Key | Meaning |
+|---|---|
+| `class` | The fully qualified class to preview. |
+| `width`, `height` | Render size in columns and rows. Ignored in interactive mode, which fills the terminal. |
+| `extra` | Another `.cs` file to compile with the view — layout-only helpers. Repeat the key for several. |
+| `reference` | An assembly to add to the preview's reference set, for a control library beyond Terminal.Gui and TuiControls. A `.dll`, or a directory of them. |
+| `cliPath` | Where to find the `tuipreview` tool for this view. Beats the `tuiLivePreview.cliPath` setting. |
+
+Several keys fit on one line, and a value with spaces goes in quotes:
+
+```csharp
+// @tuipreview class=MyApp.Dialog width=100 extra="Layout/Helpers With Spaces.tui.cs"
+```
+
+`extra`, `reference` and `cliPath` paths are relative to the view, not to your terminal's working
+directory.
+
+### The sidecar: `MyView.tui.json`
+
+For a view with more to say than one line of comment — several `extra` files, say — put a JSON
+file next to it, named after it. `MainView.tui.cs` goes with `MainView.tui.json`:
+
+```jsonc
+{
+  // Comments and trailing commas are fine.
+  "class": "SampleApp.MainView",
+  "width": 120,
+  "extra": ["Layout/Shared.tui.cs", "Layout/Table.cs"],
+}
+```
+
+Same keys as the annotation. **The annotation wins** where both state the same key, because it is
+the one you are looking at — and because a sidecar cannot describe an unsaved buffer. With the
+file open and edited but not saved, the annotation on screen is what applies.
+
+Precedence, highest first: an explicit `--class` on the command line → the annotation → the
+sidecar → the `tuiLivePreview.*` settings → what the file declares.
+
+An unknown key or a bad value is reported in the log and ignored; it never stops a preview.
+
 ## The class name is inferred
 
-The tool requires `--class`, so the extension reads the namespace and the class declaration
-out of the file you right-clicked. You are only prompted if the file declares no class.
-Override it with `tuiLivePreview.className`.
+If a view states nothing, the extension — and the tool — read the namespace and the class
+declaration out of the file. You are only prompted if the file declares no class either.
+Override with `tuiLivePreview.className`.
 
 ## Finding the tool
 
@@ -183,6 +233,7 @@ npm test            # compile, then run the extension against a stubbed vscode h
 
 `npm test` loads the real compiled `out/extension.js` with a stubbed `vscode` module and
 drives the real command handlers, asserting on the command lines they produce. It covers
-class-name inference (including partial layout halves and the prompt), tool discovery and
-its fallbacks, path quoting for paths containing spaces, terminal reuse, shell-aware command
-lines, unsaved-buffer mirroring, the error paths, and the context-menu `when` clauses.
+class-name inference (including partial layout halves and the prompt), a view's own settings
+(annotations, sidecars and which wins), tool discovery and its fallbacks, path quoting for
+paths containing spaces, terminal reuse, shell-aware command lines, unsaved-buffer mirroring,
+the error paths, and the context-menu `when` clauses.
