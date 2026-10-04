@@ -1,8 +1,9 @@
 # Terminal.Gui.LivePrev
 
-Live preview for Terminal.Gui views in VS Code: right-click a `*.tui.cs` view and see it
-rendered as a real Terminal.Gui view, much like the XAML designer preview. See
-[vscode-extension/README.md](vscode-extension/README.md) for how to use it.
+Live preview for Terminal.Gui views in VS Code and Visual Studio: right-click a `*.tui.cs` view
+and see it rendered as a real Terminal.Gui view, much like the XAML designer preview. See
+[vscode-extension/README.md](vscode-extension/README.md) for how to use it, and
+[vs-extension/README.md](vs-extension/README.md) for what differs in Visual Studio.
 
 ## Installing the VS Code extension
 
@@ -47,3 +48,18 @@ code --install-extension tui-live-preview-0.1.0.vsix
 
 or use **Extensions: Install from VSIX...** in VS Code. The other machine needs only the .NET 10
 runtime, because the tool ships inside the package.
+
+## Installing the Visual Studio extension
+
+You need the [.NET 10 SDK](https://dotnet.microsoft.com/download) and Visual Studio 2022 17.14 or
+later, or Visual Studio 2026. Then, from the repository root in PowerShell:
+
+```powershell
+.\install-vs-ext.ps1
+```
+
+This builds the tool, bundles it into the extension, runs the extension tests, packages a `.vsix`
+and opens the Visual Studio installer on it, which asks you to close Visual Studio if it is
+running. `-Exp` installs into the experimental instance (`devenv /rootSuffix Exp`) instead, and
+`-NoInstall` stops after packaging; the `.vsix` in `vs-extension\bin\Release` can then be installed
+on any machine by double-clicking it.

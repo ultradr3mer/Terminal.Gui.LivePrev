@@ -86,27 +86,79 @@ internal sealed partial class ViewSettings
   /// </summary>
   public static ViewSettings Read(string viewFile)
   {
+    string text;
+    try
+    {
+      text = File.ReadAllText(viewFile);
+    }
+    catch (IOException ex)
+    {
+      var unreadable = Read(viewFile, string.Empty);
+      unreadable._warnings.Add(
+        $"could not read {Path.GetFileName(viewFile)} for annotations ({ex.Message}).");
+      return unreadable;
+    }
+
+    return Read(viewFile, text);
+  }
+
+  /// <summary>
+  /// Reads both sources for <paramref name="viewFile"/>, taking the annotations from
+  /// <paramref name="text"/> rather than from disk.
+  /// <para>
+  /// This is what an editor calls: the open buffer may hold an annotation that is not saved yet,
+  /// and that unsaved annotation is the one the user is looking at. The sidecar is still read from
+  /// disk, since nothing else could hold it.
+  /// </para>
+  /// </summary>
+  public static ViewSettings Read(string viewFile, string text)
+  {
     var settings = new ViewSettings
     {
       BaseDir = Path.GetDirectoryName(Path.GetFullPath(viewFile))!,
     };
 
-    // Named after the view: MyView.tui.cs -> MyView.tui.json. The .tui.cs suffix is dropped
-    // rather than replaced, so the pair reads as one artifact with two halves.
-    string name = Path.GetFileName(viewFile);
-    int suffix = name.LastIndexOf(".tui.cs", StringComparison.Ordinal);
-    if (suffix > 0)
+    if (SidecarPathFor(viewFile) is { } sidecar)
     {
-      string sidecar = Path.Combine(
-        Path.GetDirectoryName(Path.GetFullPath(viewFile))!,
-        name[..suffix] + ".tui.json");
       settings.ReadSidecar(sidecar);
     }
 
-    settings.ReadAnnotations(viewFile);
+    settings.ReadAnnotations(viewFile, text);
 
     return settings;
   }
+
+  /// <summary>
+  /// The sidecar that goes with a view, or null when the name does not end in <c>.tui.cs</c>.
+  /// <para>
+  /// Named after the view: MyView.tui.cs -> MyView.tui.json. The .tui.cs suffix is dropped
+  /// rather than replaced, so the pair reads as one artifact with two halves.
+  /// </para>
+  /// </summary>
+  public static string? SidecarPathFor(string viewFile)
+  {
+    string name = Path.GetFileName(viewFile);
+    int suffix = name.LastIndexOf(".tui.cs", StringComparison.Ordinal);
+    if (suffix <= 0)
+    {
+      return null;
+    }
+
+    return Path.Combine(
+      Path.GetDirectoryName(Path.GetFullPath(viewFile))!,
+      name[..suffix] + ".tui.json");
+  }
+
+  /// <summary>
+  /// Whether either source stated a valid value for the single-valued <paramref name="key"/>.
+  /// An editor's "init" uses this to write down only what the view does not already say.
+  /// </summary>
+  public bool States(string key) => _stated.ContainsKey(key);
+
+  /// <summary>
+  /// Whether <paramref name="text"/> already holds a <c>// @tuipreview</c> line, valid or not.
+  /// </summary>
+  public static bool HasAnnotation(string text) => Annotation().IsMatch(text);
 
   private void ReadSidecar(string file)
   {
@@ -213,19 +265,8 @@ internal sealed partial class ViewSettings
     return [];
   }
 
-  private void ReadAnnotations(string viewFile)
+  private void ReadAnnotations(string viewFile, string text)
   {
-    string text;
-    try
-    {
-      text = File.ReadAllText(viewFile);
-    }
-    catch (IOException ex)
-    {
-      _warnings.Add($"could not read {Path.GetFileName(viewFile)} for annotations ({ex.Message}).");
-      return;
-    }
-
     string origin = Path.GetFileName(viewFile);
     string baseDir = Path.GetDirectoryName(Path.GetFullPath(viewFile))!;
 
@@ -373,6 +414,15 @@ internal sealed partial class ViewSettings
       return null;
     }
 
+    return InferClassNameFromText(text);
+  }
+
+  /// <summary>
+  /// <see cref="InferClassName"/> for source that is already in memory, such as an editor buffer
+  /// with unsaved changes.
+  /// </summary>
+  public static string? InferClassNameFromText(string text)
+  {
     // Comments are removed first, so a commented-out class cannot be picked up.
     string code = Regex.Replace(Regex.Replace(text, @"/\*[\s\S]*?\*/", " "), @"//[^\n]*", " ");
 
