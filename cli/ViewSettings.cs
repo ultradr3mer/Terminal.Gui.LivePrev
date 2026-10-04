@@ -22,6 +22,7 @@ internal sealed partial class ViewSettings
 {
   private readonly List<string> _extra = new();
   private readonly List<string> _references = new();
+  private readonly List<string> _projects = new();
   private readonly List<string> _warnings = new();
 
   /// <summary>
@@ -52,6 +53,13 @@ internal sealed partial class ViewSettings
   /// holding one, because both are what a third-party control library hands out.
   /// </summary>
   public IReadOnlyList<string> References => _references;
+
+  /// <summary>
+  /// Projects whose build output is added to the reference set, as written: a control library in
+  /// the same solution, which is what a <c>&lt;ProjectReference&gt;</c> in the app points at. The
+  /// tool asks MSBuild where each one builds to; it never builds them itself.
+  /// </summary>
+  public IReadOnlyList<string> Projects => _projects;
 
   /// <summary>
   /// A path to the <c>tuipreview</c> tool for this view, or null to let the caller find one.
@@ -216,7 +224,7 @@ internal sealed partial class ViewSettings
 
     if (root.TryGetProperty("extra", out JsonElement extra))
     {
-      foreach (string entry in ReadExtraList(extra, origin))
+      foreach (string entry in ReadExtraList(extra, "extra", origin))
       {
         Apply("extra", Resolve(baseDir, entry), origin, baseDir);
       }
@@ -227,16 +235,24 @@ internal sealed partial class ViewSettings
     // "relative to that view".
     if (root.TryGetProperty("reference", out JsonElement references))
     {
-      foreach (string entry in ReadExtraList(references, origin))
+      foreach (string entry in ReadExtraList(references, "reference", origin))
       {
         Apply("reference", Resolve(baseDir, entry), origin, baseDir);
+      }
+    }
+
+    if (root.TryGetProperty("project", out JsonElement projects))
+    {
+      foreach (string entry in ReadExtraList(projects, "project", origin))
+      {
+        Apply("project", Resolve(baseDir, entry), origin, baseDir);
       }
     }
 
     // Reported after the known keys are read, so a typo does not also suppress a value.
     foreach (JsonProperty property in root.EnumerateObject())
     {
-      if (property.Name is not ("class" or "width" or "height" or "extra" or "reference" or "clipath"))
+      if (property.Name is not ("class" or "width" or "height" or "extra" or "reference" or "project" or "clipath"))
       {
         _warnings.Add($"{origin}: unknown key \"{property.Name}\"; ignoring it.");
       }
@@ -247,7 +263,7 @@ internal sealed partial class ViewSettings
   /// The "extra" entries, accepting a bare string as well as an array because a single extra
   /// file is the common case and an array of one is noise.
   /// </summary>
-  private IEnumerable<string> ReadExtraList(JsonElement extra, string origin)
+  private IEnumerable<string> ReadExtraList(JsonElement extra, string key, string origin)
   {
     if (extra.ValueKind == JsonValueKind.Array)
     {
@@ -261,7 +277,7 @@ internal sealed partial class ViewSettings
       return [extra.GetString()!];
     }
 
-    _warnings.Add($"{origin}: \"extra\" must be a string or an array of strings; ignoring it.");
+    _warnings.Add($"{origin}: \"{key}\" must be a string or an array of strings; ignoring it.");
     return [];
   }
 
@@ -279,9 +295,10 @@ internal sealed partial class ViewSettings
           ? pair.Groups["quoted"].Value
           : pair.Groups["bare"].Value;
 
-        // Both name a file the view is written against, so both resolve against the view.
+        // All name a file the view is written against, so all resolve against the view.
         bool isFile = key.Equals("extra", StringComparison.OrdinalIgnoreCase)
-          || key.Equals("reference", StringComparison.OrdinalIgnoreCase);
+          || key.Equals("reference", StringComparison.OrdinalIgnoreCase)
+          || key.Equals("project", StringComparison.OrdinalIgnoreCase);
 
         Apply(key, isFile ? Resolve(baseDir, value) : value, origin, baseDir);
       }
@@ -345,6 +362,11 @@ internal sealed partial class ViewSettings
         // directory is kept as written: the caller expands it, because which file inside a
         // directory is the library is not a guess this parser should be making.
         _references.Add(value);
+        Source = "view settings";
+        break;
+
+      case "project":
+        _projects.Add(value);
         Source = "view settings";
         break;
 

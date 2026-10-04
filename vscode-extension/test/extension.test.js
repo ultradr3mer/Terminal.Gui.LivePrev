@@ -989,6 +989,40 @@ async function viewSettingsTests() {
         );
     });
 
+    console.log("@tuipreview projects");
+
+    const controlsProject = path.join(root, "Controls", "Controls.csproj");
+    fs.mkdirSync(path.dirname(controlsProject), { recursive: true });
+    fs.writeFileSync(controlsProject, "<Project />");
+    const projd = h.writeView(
+        root,
+        "Projected.tui.cs",
+        "// @tuipreview class=Demo.Projected project=../Controls/Controls.csproj\n" +
+            h.layoutHalf("Demo", "Projected")
+    );
+    h.edit(projd);
+    const projLine = h.lastLine(await h.run("tuiLivePreview.render"));
+
+    h.test("a project is passed to the tool, resolved against the view", () => {
+        h.assert.ok(projLine.includes(`--project "${controlsProject}"`), projLine);
+    });
+
+    const badProj = h.writeView(
+        root,
+        "BadProj.tui.cs",
+        "// @tuipreview class=Demo.BadProj project=../Nope/Nope.csproj\n" +
+            h.layoutHalf("Demo", "BadProj")
+    );
+    h.edit(badProj);
+    const projMessage = await h.runExpectingError("tuiLivePreview.render");
+
+    h.test("a missing project is reported before anything is launched", () => {
+        h.assert.ok(
+            projMessage && projMessage.includes("Nope.csproj"),
+            `expected the missing project to be named: ${projMessage}`
+        );
+    });
+
     console.log("@tuipreview cliPath");
 
     const localCli = path.join(root, "tools", "tuipreview.exe");

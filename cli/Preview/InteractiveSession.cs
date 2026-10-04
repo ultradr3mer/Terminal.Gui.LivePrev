@@ -20,9 +20,16 @@ internal static class InteractiveSession
     /// Problems with the view's own settings. They were printed before the session started, but
     /// the session takes over the screen, so they are repeated in the log pane to stay visible.
     /// </param>
+    /// <param name="dependencies">
+    /// Further files whose changes rebuild the view: the build outputs of the projects it
+    /// references, so rebuilding a library shows up without restarting the preview.
+    /// </param>
     public static int Run(string displayName, string watchedPath,
-        Func<RenderPipeline.BuildResult> build, IReadOnlyList<string> warnings)
+        Func<RenderPipeline.BuildResult> build, IReadOnlyList<string> warnings,
+        IReadOnlyList<string>? dependencies = null)
     {
+        string[] watched = [watchedPath, .. dependencies ?? []];
+
         var builder = new PreviewBuilder(displayName, watchedPath, build);
         var runnable = builder.Chrome;
 
@@ -35,7 +42,7 @@ internal static class InteractiveSession
         app.Init(DriverRegistry.Names.ANSI);
 
         // Timer for refresh and time related status
-        SetupTimer(app, builder, runnable, watchedPath);
+        SetupTimer(app, builder, runnable, watched);
 
         builder.Rebuild();
 
@@ -45,17 +52,17 @@ internal static class InteractiveSession
         return 0;
     }
 
-    private static void SetupTimer(IApplication app, PreviewBuilder builder, PreviewChrome runnable, string watchedPath)
+    private static void SetupTimer(IApplication app, PreviewBuilder builder, PreviewChrome runnable, IReadOnlyList<string> watchedPaths)
     {
        TimeSpan FilePollInterval = TimeSpan.FromMilliseconds(400);
 
         // Poll on the main loop rather than a background thread, so the view swap already
         // happens on the UI thread and needs no marshalling.
-        string? lastSeen = ReadStamp(watchedPath);
+        string lastSeen = ReadStamps(watchedPaths);
         int lastMinute = -1;
         app.AddTimeout(FilePollInterval, () =>
         {
-            string current = ReadStamp(watchedPath);
+            string current = ReadStamps(watchedPaths);
             if (current != lastSeen)
             {
                 lastSeen = current;
@@ -68,6 +75,10 @@ internal static class InteractiveSession
             return true; // keep polling
         });
     }
+
+    /// <summary>One token for several files: any of them changing changes it.</summary>
+    private static string ReadStamps(IReadOnlyList<string> paths) =>
+        string.Join("|", paths.Select(ReadStamp));
 
     /// <summary>
     /// Cheap change token: last write time plus length. Size is included because a save

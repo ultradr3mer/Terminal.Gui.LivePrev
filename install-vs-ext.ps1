@@ -8,8 +8,8 @@
     inside the VSIX, so the extension works anywhere with no setup. Inside this repo a build in
     cli\bin takes precedence, so changes to the tool show up in previews right away.
 
-    The extension is a VisualStudio.Extensibility extension: it runs out of process on .NET, and
-    installs into Visual Studio 2022 17.14 or later and Visual Studio 2026.
+    The extension is a VisualStudio.Extensibility extension: it runs out of process on .NET 10,
+    which only Visual Studio 2026 hosts.
 
     Every build gets a fresh version number, because VSIXInstaller refuses to install a version
     that is already installed.
@@ -28,7 +28,7 @@
 .PARAMETER NoInstall
     Build and package only. The VSIX path is printed; double-click it to install.
 
-    Needs the .NET 10 SDK and Visual Studio 2022 17.14+ or 2026.
+    Needs the .NET 10 SDK and Visual Studio 2026.
 
 .EXAMPLE
     .\install-vs-ext.ps1
@@ -121,9 +121,9 @@ if ($NoInstall) {
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 if (-not (Test-Path $vswhere)) { Fail 'vswhere.exe not found; is Visual Studio installed?' }
 
-# VisualStudio.Extensibility extensions need 17.14 or later.
-$instances = & $vswhere -prerelease -version '[17.14,)' -format json | ConvertFrom-Json
-if (-not $instances) { Fail 'no Visual Studio 2022 17.14+ or 2026 installation found' }
+# Visual Studio 2026 (18.x) is the first with a .NET 10 extension host.
+$instances = & $vswhere -prerelease -version '[18.0,)' -format json | ConvertFrom-Json
+if (-not $instances) { Fail 'no Visual Studio 2026 installation found' }
 
 $installer = Join-Path $instances[0].installationPath 'Common7\IDE\VSIXInstaller.exe'
 $instanceIds = ($instances | ForEach-Object instanceId) -join ','

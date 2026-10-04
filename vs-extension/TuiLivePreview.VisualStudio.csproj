@@ -2,9 +2,10 @@
 
   <PropertyGroup>
     <!-- VisualStudio.Extensibility runs extensions out of process, on .NET rather than .NET
-         Framework. That is what lets this project share cli/ViewSettings.cs with the tool, and it
-         installs into Visual Studio 2022 (17.14 and later) and 2026 alike. -->
-    <TargetFramework>net8.0-windows8.0</TargetFramework>
+         Framework, which is what lets this project share cli/ViewSettings.cs with the tool.
+         .NET 10 like the rest of the repo; only Visual Studio 2026 has a .NET 10 extension host,
+         so that is the install target (see TuiLivePreviewExtension). -->
+    <TargetFramework>net10.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>12</LangVersion>

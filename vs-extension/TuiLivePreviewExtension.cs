@@ -17,7 +17,13 @@ internal sealed class TuiLivePreviewExtension : Extension
             version: ExtensionAssemblyVersion,
             publisherName: "clara",
             displayName: "Terminal.Gui Live Preview",
-            description: "Preview .tui.cs views as real Terminal.Gui views, straight from the Solution Explorer and editor context menus."),
+            description: "Preview .tui.cs views as real Terminal.Gui views, straight from the Solution Explorer and editor context menus.")
+        {
+            // .NET 10, like the tool. Only Visual Studio 2026 has a .NET 10 extension host; 2022
+            // stops at .NET 8, so it is not a target.
+            DotnetTargetVersions = [DotnetTarget.Custom("net10.0")],
+            InstallationTargetVersion = "[18.0,)",
+        },
     };
 
     protected override void InitializeServices(IServiceCollection serviceCollection)

@@ -108,6 +108,14 @@ public class ArgumentTests
     }
 
     [Fact]
+    public void Projects_are_passed_for_the_tool_to_resolve()
+    {
+        var request = Request() with { Projects = [@"C:\src\Controls\Controls.csproj"] };
+        var args = PreviewCommand.Arguments(request, PreviewMode.Interactive);
+        Assert.Equal(@"C:\src\Controls\Controls.csproj", args[args.IndexOf("--project") + 1]);
+    }
+
+    [Fact]
     public void Dotnet_run_separates_its_own_arguments_from_the_tools()
     {
         var request = Request() with { Launcher = new Launcher.DotnetRun(@"C:\r\cli\TuiPreview.Cli.csproj") };
@@ -259,6 +267,35 @@ public class PlannerTests
 
         var error = Assert.Throws<PreviewException>(() => PreviewPlanner.Validate(view, ViewSettings.Read(view, text)));
         Assert.Contains("extra file that does not exist", error.Message);
+    }
+
+    [Fact]
+    public void Projects_resolve_against_the_view_and_must_exist()
+    {
+        using var dir = new TempDir();
+        string project = dir.Write("Controls/Controls.csproj", "<Project />");
+        string text = "// @tuipreview project=../Controls/Controls.csproj\nclass Main {}";
+        string view = dir.Write("App/Main.tui.cs", text);
+
+        var settings = ViewSettings.Read(view, text);
+        Assert.Equal(project, Path.GetFullPath(settings.Projects.Single()));
+        PreviewPlanner.Validate(view, settings);
+
+        string missing = "// @tuipreview project=Nope.csproj\nclass Main {}";
+        var error = Assert.Throws<PreviewException>(() => PreviewPlanner.Validate(view, ViewSettings.Read(view, missing)));
+        Assert.Contains("project that does not exist", error.Message);
+    }
+
+    [Fact]
+    public void A_sidecar_takes_projects_as_a_string_or_a_list()
+    {
+        using var dir = new TempDir();
+        dir.Write("Main.tui.json", "{ \"project\": [\"a/A.csproj\", \"b/B.csproj\"] }");
+        string view = dir.Write("Main.tui.cs", "class Main {}");
+        Assert.Equal(2, ViewSettings.Read(view, "class Main {}").Projects.Count);
+
+        dir.Write("Main.tui.json", "{ \"project\": \"a/A.csproj\" }");
+        Assert.Single(ViewSettings.Read(view, "class Main {}").Projects);
     }
 
     [Fact]

@@ -5,8 +5,8 @@ any `*.tui.cs` view and preview it as a real Terminal.Gui view, without building
 belongs to. Both extensions run the same `tuipreview` tool, read the same per-view settings and
 offer the same commands.
 
-Requires Visual Studio 2022 17.14 or later, or Visual Studio 2026, and the .NET 10 runtime for the
-bundled tool. It is a [VisualStudio.Extensibility](https://learn.microsoft.com/visualstudio/extensibility/visualstudio.extensibility/)
+Requires Visual Studio 2026 and the .NET 10 runtime. The extension runs on .NET 10 like the tool,
+and Visual Studio 2022 cannot host that. It is a [VisualStudio.Extensibility](https://learn.microsoft.com/visualstudio/extensibility/visualstudio.extensibility/)
 extension, so it runs out of process and cannot slow down or crash Visual Studio itself.
 
 ## Commands
@@ -42,7 +42,7 @@ The behaviour is the same; what Visual Studio offers around it is not.
 
 ## Settings a view carries with it
 
-Exactly as in VS Code: a `// @tuipreview class=... width=... height=... extra=... reference=... clipath=...`
+Exactly as in VS Code: a `// @tuipreview class=... width=... height=... extra=... reference=... project=... clipath=...`
 annotation in the view, or a `MyView.tui.json` sidecar next to it. The annotation wins, and an
 unsaved annotation in the editor is the one that applies. This extension compiles in the tool's
 own parser (`cli/ViewSettings.cs`), so the two cannot disagree about the grammar. See the

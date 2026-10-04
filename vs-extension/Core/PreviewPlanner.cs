@@ -75,6 +75,18 @@ internal static class PreviewPlanner
                     "Check its \"reference\" annotation or .tui.json.");
             }
         }
+
+        // Only that the project exists. Whether it has been built is the tool's question: it asks
+        // MSBuild where the output goes, and says so in the preview window if it is not there.
+        foreach (string project in settings.Projects)
+        {
+            if (!File.Exists(project))
+            {
+                throw new PreviewException(
+                    $"{Path.GetFileName(view)} lists a project that does not exist: {project}. " +
+                    "Check its \"project\" annotation or .tui.json.");
+            }
+        }
     }
 
     /// <summary>
@@ -129,6 +141,7 @@ internal static class PreviewPlanner
 
         body.Append("  // \"extra\": [\"Layout/Shared.cs\"],\n");
         body.Append("  // \"reference\": [\"../lib/Controls.dll\"],\n");
+        body.Append("  // \"project\": [\"../Controls/Controls.csproj\"],\n");
         body.Append("  // \"clipath\": \"../tools/tuipreview.dll\",\n");
         body.Append("}\n");
         return body.ToString();

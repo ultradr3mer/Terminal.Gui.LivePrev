@@ -128,6 +128,7 @@ internal sealed class PreviewService : IDisposable
             PreviewPath = previewPath,
             ExtraFiles = settings.Extra,
             References = settings.References,
+            Projects = settings.Projects,
             // A view's own size wins over the setting, so one wide view does not make every other
             // preview wide too.
             Width = settings.Width ?? editor.Width,
@@ -140,6 +141,7 @@ internal sealed class PreviewService : IDisposable
             (previewPath == view ? string.Empty : $" preview={previewPath}") +
             (settings.Extra.Count > 0 ? $" extra={string.Join(",", settings.Extra)}" : string.Empty) +
             (settings.References.Count > 0 ? $" refs={string.Join(",", settings.References)}" : string.Empty) +
+            (settings.Projects.Count > 0 ? $" projects={string.Join(",", settings.Projects)}" : string.Empty) +
             (settings.CliPath is not null ? $" clipath={settings.CliPath}" : string.Empty));
 
         if (editor.Confirmation)

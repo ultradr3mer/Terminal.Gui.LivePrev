@@ -247,8 +247,12 @@ internal static class RenderPipeline
                 // Only the assemblies the view asked for. Anything else is Terminal.Gui's own
                 // dependency graph, which the default context has already, so returning null
                 // defers to it rather than guessing at a path.
+                //
+                // From memory rather than the path, for the same reason as the references below:
+                // a dll loaded from its path stays locked, and a library the view uses through a
+                // project reference could then not be rebuilt while its preview is open.
                 return requested.TryGetValue(name.Name ?? string.Empty, out string? path)
-                    ? context.LoadFromAssemblyPath(path)
+                    ? context.LoadFromStream(new MemoryStream(File.ReadAllBytes(path)))
                     : null;
             };
         }
@@ -356,6 +360,35 @@ internal static class RenderPipeline
     /// </para>
     /// </summary>
     private static IEnumerable<string> ExpandReferences(IReadOnlyList<string>? references)
+    {
+        return ExpandAll(references)
+            // The default set is the tool's: a library's bin folder or package list carries its
+            // own Terminal.Gui and framework assemblies, and the view must bind to the copies the
+            // tool instantiates it with, or its View is not the tool's View.
+            .Where(path => !DefaultAssemblyNames.Value.Contains(Path.GetFileNameWithoutExtension(path)))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The simple names of the assemblies <see cref="DefaultReferences"/> always includes.</summary>
+    private static readonly Lazy<HashSet<string>> DefaultAssemblyNames = new(() =>
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            typeof(View).Assembly.GetName().Name!,
+            typeof(TuiControls.Splitter).Assembly.GetName().Name!,
+        };
+
+        string runtimeDir = Path.GetFullPath(
+            System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory());
+        foreach (string dll in Directory.EnumerateFiles(runtimeDir, "*.dll"))
+        {
+            names.Add(Path.GetFileNameWithoutExtension(dll));
+        }
+
+        return names;
+    });
+
+    private static IEnumerable<string> ExpandAll(IReadOnlyList<string>? references)
     {
         foreach (string reference in references ?? Array.Empty<string>())
         {

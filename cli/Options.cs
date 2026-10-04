@@ -29,6 +29,9 @@ internal sealed class Options
   [Option("reference", Required = false, HelpText = "Assemblies added to the default reference set, for a view that uses a control library beyond Terminal.Gui and TuiControls. A dll, or a directory holding one. Space-separated for several. Additive: the defaults are always included.")]
   public IEnumerable<string>? Reference { get; set; }
 
+  [Option("project", Required = false, HelpText = "Projects whose build output is added to the reference set, for a view that uses a control library from the same solution. The project is not built: its output must exist. Space-separated for several. Additive, like --reference.")]
+  public IEnumerable<string>? Project { get; set; }
+
   // Accepted for older command lines; rendering is the default anyway.
   [Option('r', "render", Required = false, HelpText = "Compile and render the view to characters in this terminal. This is the default.")]
   public bool Render { get; set; }

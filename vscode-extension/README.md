@@ -68,6 +68,7 @@ public sealed partial class MainView : Window { ... }
 | `width`, `height` | Render size in columns and rows. Ignored in interactive mode, which fills the terminal. |
 | `extra` | Another `.cs` file to compile with the view — layout-only helpers. Repeat the key for several. |
 | `reference` | An assembly to add to the preview's reference set, for a control library beyond Terminal.Gui and TuiControls. A `.dll`, or a directory of them. |
+| `project` | A `.csproj` whose build output is added to the reference set, together with its NuGet packages: the preview's version of a `<ProjectReference>`. See below. |
 | `cliPath` | Where to find the `tuipreview` tool for this view. Beats the `tuiLivePreview.cliPath` setting. |
 
 Several keys fit on one line, and a value with spaces goes in quotes:
@@ -76,7 +77,7 @@ Several keys fit on one line, and a value with spaces goes in quotes:
 // @tuipreview class=MyApp.Dialog width=100 extra="Layout/Helpers With Spaces.tui.cs"
 ```
 
-`extra`, `reference` and `cliPath` paths are relative to the view, not to your terminal's working
+`extra`, `reference`, `project` and `cliPath` paths are relative to the view, not to your terminal's working
 directory.
 
 ### The sidecar: `MyView.tui.json`
@@ -105,12 +106,30 @@ When the annotation overrides a value the sidecar states differently, the previe
 warning — in VS Code, in the tool's output and in the interactive log pane — because otherwise
 the sidecar loses without a word.
 
+### Control libraries from your solution: `project`
+
+A view that uses controls from another project in the solution names that project:
+
+```csharp
+// @tuipreview project=../../MyControls/MyControls.csproj
+```
+
+The tool asks MSBuild where the project builds to, without building it, and references its
+output dll, the dlls next to it (the projects it references in turn) and the runtime assemblies
+of its NuGet packages. **The project has to be built already**; if it is not, the preview says so
+and names the `dotnet build` command to run. Build the library after changing it, as you would
+before running the app: a running interactive or watch preview notices the new build and
+refreshes, and the dll is never locked, so the build does not fail while a preview is open.
+
+A multi-targeted project is evaluated for the newest framework the tool can load (.NET 10 or
+older, else netstandard2.x).
+
 ### Starting one: **Init**
 
 **TUI Preview: Init** detects what the view would preview with today — the class, and the width
 and height — and asks where to write it down:
 
-- **Sidecar** creates `MyView.tui.json`, with the optional keys (`extra`, `reference`, `clipath`)
+- **Sidecar** creates `MyView.tui.json`, with the optional keys (`extra`, `reference`, `project`, `clipath`)
   as commented-out examples.
 - **Annotation in the view** adds a `// @tuipreview class=... width=... height=...` line at the
   top of the `.tui.cs`. It is an ordinary edit, so it can be undone.

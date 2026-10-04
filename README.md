@@ -51,8 +51,7 @@ runtime, because the tool ships inside the package.
 
 ## Installing the Visual Studio extension
 
-You need the [.NET 10 SDK](https://dotnet.microsoft.com/download) and Visual Studio 2022 17.14 or
-later, or Visual Studio 2026. Then, from the repository root in PowerShell:
+You need the [.NET 10 SDK](https://dotnet.microsoft.com/download) and Visual Studio 2026. Then, from the repository root in PowerShell:
 
 ```powershell
 .\install-vs-ext.ps1

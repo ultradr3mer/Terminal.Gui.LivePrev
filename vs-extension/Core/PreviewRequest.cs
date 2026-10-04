@@ -30,6 +30,12 @@ internal sealed record PreviewRequest
     /// <summary>Assemblies to add to the tool's default reference set.</summary>
     public IReadOnlyList<string> References { get; init; } = [];
 
+    /// <summary>
+    /// Projects whose existing build output the tool adds to the reference set. The tool asks
+    /// MSBuild where they build to; neither it nor the extension builds them.
+    /// </summary>
+    public IReadOnlyList<string> Projects { get; init; } = [];
+
     /// <summary>Render size. Interactive mode fills the console and ignores it.</summary>
     public int Width { get; init; } = 80;
 
@@ -83,6 +89,12 @@ internal static class PreviewCommand
         {
             args.Add("--reference");
             args.AddRange(request.References);
+        }
+
+        if (request.Projects.Count > 0)
+        {
+            args.Add("--project");
+            args.AddRange(request.Projects);
         }
 
         switch (mode)

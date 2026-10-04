@@ -16,12 +16,14 @@ The preview compiles only the `.tui.cs`, adding a stub `public X() { InitializeC
 
 Per-view settings live with the view, not in the editor settings, because a view is the only thing that knows its own class name and its own helpers. Two sources, annotation first:
 
-- **`// @tuipreview key=value ...`** in the `.tui.cs` — `class`, `width`, `height`, `extra`, `reference`, `clipath`. Repeatable, several keys per line, values quotable.
+- **`// @tuipreview key=value ...`** in the `.tui.cs` — `class`, `width`, `height`, `extra`, `reference`, `project`, `clipath`. Repeatable, several keys per line, values quotable.
 - **`MyView.tui.json`**, named after the view. Same keys as JSON, tolerating `//` comments and trailing commas.
 
-`extra`, `reference` and `clipath` paths are relative to the view. A bad value or an unknown key is logged and ignored, never fatal.
+`extra`, `reference`, `project` and `clipath` paths are relative to the view. A bad value or an unknown key is logged and ignored, never fatal.
 
-`reference` is **additive**: `DefaultReferences()` always yields the framework, Terminal.Gui and TuiControls first, then the requested assemblies, so a view written against a third-party control library keeps all of them. A directory is expanded to the `*.dll` inside it. Those assemblies are also hooked into the preview's `AssemblyLoadContext` via `Resolving` — referenced by the compiler is not the same as loadable at runtime, and without the hook the view compiles cleanly and then throws `FileNotFoundException` on the first line touching a type from it.
+`reference` is **additive**: `DefaultReferences()` always yields the framework, Terminal.Gui and TuiControls first, then the requested assemblies, so a view written against a third-party control library keeps all of them. A directory is expanded to the `*.dll` inside it. Those assemblies are also hooked into the preview's `AssemblyLoadContext` via `Resolving` — referenced by the compiler is not the same as loadable at runtime, and without the hook the view compiles cleanly and then throws `FileNotFoundException` on the first line touching a type from it. They are loaded from memory, not their path, so they are never locked. Any dll whose name is in the default set (Terminal.Gui, TuiControls, the framework) is dropped, so the view binds to the tool's own copies.
+
+`project` names a `.csproj`, for a control library in the same solution. `Preview/ProjectOutputs.cs` asks `dotnet msbuild -getProperty:TargetPath -t:ResolvePackageAssets -getItem:RuntimeCopyLocalItems` where it builds to, and turns it into references: the output dll, the dlls beside it, and its packages' runtime assemblies from the NuGet cache. It is evaluated, **never built** — the "nothing is built before previewing" rule holds, so an unbuilt project is an error that names the `dotnet build` to run. The output dll is watched alongside the view, so rebuilding the library refreshes a running watch or interactive preview.
 
 `clipath` is read only by the extension: the tool cannot act on it, since it *is* the tool. It outranks the `tuiLivePreview.cliPath` setting, which is the folder-wide default.
 
@@ -36,7 +38,7 @@ Both sides implement this, deliberately: `cli/ViewSettings.cs` (with `InferClass
 ## The parts
 
 1. **`cli/` – the `tuipreview` tool** (`TuiPreview.Cli.csproj`, net10.0, Terminal.Gui `[2.5.0,2.6)`, Roslyn), packed as a dotnet tool.
-   - `Options.cs` defines the command-line contract (`--view`, `--class`, `--interactive`, `--watch`, `--extra`, `--reference`, `--display-name`, `--width/--height`, hidden test flags `--ui-snapshot`/`--ui-flood`). `--class` is optional: the view may state it, and the tool infers it as a last resort.
+   - `Options.cs` defines the command-line contract (`--view`, `--class`, `--interactive`, `--watch`, `--extra`, `--reference`, `--project`, `--display-name`, `--width/--height`, hidden test flags `--ui-snapshot`/`--ui-flood`). `--class` is optional: the view may state it, and the tool infers it as a last resort.
    - `Preview/RenderPipeline.cs` compiles in memory and renders. `DefaultReferences()` is the reference set: the shared framework, Terminal.Gui and TuiControls, plus anything `--reference` adds. Anything else in a `.tui.cs` fails with CS0246, which is intended.
    - `ResolvedPreview.cs` is the resolved value handed from option parsing to the render, so the two halves cannot disagree about which class, files or references are in play.
    - `Views/` contains the preview chrome (log pane plus splitter). `PreviewChrome.tui.cs`/`PreviewChrome.cs` follow the same split and can be previewed themselves.
@@ -44,7 +46,7 @@ Both sides implement this, deliberately: `cli/ViewSettings.cs` (with `InferClass
 3. **`vscode-extension/`**: adds "TUI Preview" commands (Interactive, Render Once, Watch, Init) to the explorer and editor context menus for `*.tui.cs` files. Init detects the view's class and size and writes them, after a modal asking where, to a new `.tui.json` sidecar or a `// @tuipreview` line at the top of the view. It writes only keys the view does not already state, and never overwrites. It runs the tool on the view and mirrors unsaved buffers to a scratch file so previews stay live. Almost all of the logic is in `src/extension.ts`.
    - The tool ships inside the VSIX: `install-ext.ps1` publishes it into `vscode-extension/tool/` (gitignored) before packaging, and the extension runs it with `dotnet tool/tuipreview.dll`.
    - The lookup order is `cliPath` setting → `cli/bin` build → `dotnet run` on `cli/` → bundled copy → `tuipreview` on PATH. A workspace copy of the tool wins, so this repo previews with its own changes.
-4. **`vs-extension/`**: the same commands for Visual Studio 2022 17.14+ and 2026, as a VisualStudio.Extensibility (out-of-process, net8.0) extension. Context menus in Solution Explorer and the code editor, plus Extensions > TUI Live Preview; settings under Tools > Options > TUI Live Preview, with the VS Code setting names.
+4. **`vs-extension/`**: the same commands for Visual Studio 2026, as a VisualStudio.Extensibility (out-of-process, net10.0) extension. It declares `DotnetTargetVersions = net10.0` and `InstallationTargetVersion = [18.0,)`, because only Visual Studio 2026 has a .NET 10 extension host. Context menus in Solution Explorer and the code editor, plus Extensions > TUI Live Preview; settings under Tools > Options > TUI Live Preview, with the VS Code setting names.
    - `Core/` holds everything that does not touch Visual Studio (tool lookup, command lines, launch scripts, init text, scratch copies) and is what `vs-extension/tests` covers. `PreviewService.cs` is the Visual Studio side.
    - Visual Studio has no terminal API, so each preview runs in its own console window, from a `.cmd` written to `%TEMP%\tui-live-preview` and started with `cmd /d /s /c ""script""`. The `/s` matters: without it a path containing `&` loses its quotes.
    - Command configurations are evaluated at build time into the extension metadata, so they may only use constants: no helper methods or shared static properties in them.
