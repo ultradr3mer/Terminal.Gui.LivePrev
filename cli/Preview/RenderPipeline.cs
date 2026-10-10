@@ -285,22 +285,40 @@ internal static class RenderPipeline
     /// </summary>
     private static (string Plain, string Ansi) CaptureFrame(IRunnable runnable, int width, int height)
     {
-        using IApplication app = Application.Create();
+        // Detach the driver from the real console, as Terminal.Gui's own offline renderer
+        // (MarkdownView.RenderToAnsi) does. Attached, the ANSI driver sends a CSI 18t size query
+        // at Init, and the console's reply is parsed during the first iteration and resized the
+        // screen to the console's size, overriding SetScreenSize below: every frame came out at
+        // the console's 120x30 whatever was requested. Detached, nothing is queried, nothing is
+        // read from stdin, and no escape sequences leak into the captured stdout.
+        // TerminalDevice caches its detection process-wide, which is harmless here because
+        // render-once never shares a process with an interactive session.
+        string? previousDisableIO = Environment.GetEnvironmentVariable("DisableRealDriverIO");
+        Environment.SetEnvironmentVariable("DisableRealDriverIO", "1");
 
-        // Render one frame and stop, rather than entering the interactive loop.
-        app.StopAfterFirstIteration = true;
+        try
+        {
+            using IApplication app = Application.Create();
 
-        app.Init(DriverRegistry.Names.ANSI);
+            // Render one frame and stop, rather than entering the interactive loop.
+            app.StopAfterFirstIteration = true;
 
-        // SetScreenSize, not the Cols/Rows setters. Assigning Cols/Rows only updates the
-        // reported dimensions; the driver's backing screen buffer is a separate allocation, so
-        // a view sized with Dim.Fill() laid out against the old buffer and the frame came back
-        // cropped to it (a 24-row request produced 9 rows, clipping controls placed lower down).
-        app.Driver!.SetScreenSize(width, height);
+            app.Init(DriverRegistry.Names.ANSI);
 
-        app.Run(runnable);
+            // SetScreenSize, not the Cols/Rows setters. Assigning Cols/Rows only updates the
+            // reported dimensions; the driver's backing screen buffer is a separate allocation, so
+            // a view sized with Dim.Fill() laid out against the old buffer and the frame came back
+            // cropped to it (a 24-row request produced 9 rows, clipping controls placed lower down).
+            app.Driver!.SetScreenSize(width, height);
 
-        return (app.Driver.ToString(), app.Driver.ToAnsi());
+            app.Run(runnable);
+
+            return (app.Driver.ToString(), app.Driver.ToAnsi());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DisableRealDriverIO", previousDisableIO);
+        }
     }
 
     /// <summary>
