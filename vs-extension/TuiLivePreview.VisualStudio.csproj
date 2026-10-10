@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- VisualStudio.Extensibility runs extensions out of process, on .NET rather than .NET
+         Framework, which is what lets this project share cli/ViewSettings.cs with the tool.
+         .NET 10 like the rest of the repo; only Visual Studio 2026 has a .NET 10 extension host,
+         so that is the install target (see TuiLivePreviewExtension). -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>TuiLivePreview.VisualStudio</RootNamespace>
+    <AssemblyName>TuiLivePreview.VisualStudio</AssemblyName>
+    <!-- English only, like the tool: the SDK otherwise copies a dozen satellite folders into the VSIX. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!-- The settings and output window APIs are still marked as previews in the SDK. Both are
+         what this extension is built around, so the preview diagnostics are acknowledged here
+         once rather than with a pragma in every file. -->
+    <NoWarn>$(NoWarn);VSEXTPREVIEW_SETTINGS;VSEXTPREVIEW_OUTPUTWINDOW</NoWarn>
+    <!-- CEE0027 asks for every menu and setting label to go through string-resources.json. The
+         extension is English only, like the tool and the VS Code extension. -->
+    <NoWarn>$(NoWarn);CEE0027</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.VisualStudio.Extensibility.Sdk" Version="17.14.40608" />
+    <PackageReference Include="Microsoft.VisualStudio.Extensibility.Build" Version="17.14.40608" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The same parser the tool uses, so the annotation and sidecar grammar cannot drift between
+         the tool and this extension. The VS Code extension keeps its own copy in TypeScript. -->
+    <Compile Include="..\cli\ViewSettings.cs" Link="Shared\ViewSettings.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The tool, published here by install-vs-ext.ps1 and shipped inside the VSIX. Content is
+         packed into the VSIX by default, at the same relative path. -->
+    <Content Include="tool\**" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
+</Project>

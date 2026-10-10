@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="TuiLivePreview.VisualStudio.csproj" />
+  <Project Path="tests/TuiLivePreview.VisualStudio.Tests.csproj" />
+</Solution>

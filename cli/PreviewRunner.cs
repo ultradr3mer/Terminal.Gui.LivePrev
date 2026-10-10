@@ -36,7 +36,15 @@ internal static class PreviewRunner
 
     // Read before validation, because the view may be what supplies --class. Any warning here is
     // a bad annotation, which must not stop a preview that is otherwise fine.
-    var settings = ViewSettings.Read(options.ViewCs!);
+    //
+    // When --view is an editor's scratch copy, --display-name is the real file, and the settings
+    // belong to that: its relative paths are relative to the real view, and its sidecar sits next
+    // to the real view. The text is still the scratch copy's, since an unsaved annotation is the
+    // one that applies. Read against the scratch copy, "extra=Layout/Helper.cs" would point into
+    // the temp folder.
+    var settings = options.DisplayName is { Length: > 0 } realView
+      ? ViewSettings.Read(Path.GetFullPath(realView), File.ReadAllText(options.ViewCs!))
+      : ViewSettings.Read(options.ViewCs!);
     foreach (string warning in settings.Warnings)
     {
       Console.Error.WriteLine($"warning: {warning}");
@@ -80,6 +88,34 @@ internal static class PreviewRunner
       references.Add(reference);
     }
 
+    // Projects add up like references, and turn into references: what the project builds to,
+    // and the packages it runs with. Evaluated, not built, so a missing build is a problem here
+    // rather than a slow first preview. The outputs are watched too, so rebuilding the library
+    // refreshes a running preview.
+    var projects = new List<string>(settings.Projects);
+    foreach (string project in options.Project ?? Enumerable.Empty<string>())
+    {
+      CheckFile(project, "--project", problems);
+      projects.Add(project);
+    }
+
+    var dependencies = new List<string>();
+    if (problems.Count == 0)
+    {
+      foreach (string project in projects.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase))
+      {
+        ProjectOutputs.Resolved resolved = ProjectOutputs.Resolve(project);
+        if (resolved.Problem is not null)
+        {
+          problems.Add(resolved.Problem);
+          continue;
+        }
+
+        references.AddRange(resolved.Assemblies);
+        dependencies.Add(resolved.TargetPath!);
+      }
+    }
+
     if (problems.Count > 0)
     {
       return Report(problems);
@@ -104,8 +140,11 @@ internal static class PreviewRunner
       // relative path written in a view means "relative to that view". Command line values are
       // relative to wherever the user ran the tool from, which is the only sensible reading of a
       // path typed at a prompt. GetFullPath does the right thing in both cases.
-      SourceFiles = extras.Select(Path.GetFullPath).ToArray(),
-      References = references.Select(Path.GetFullPath).ToArray(),
+      // Distinct, because an editor passes the view's own extras explicitly as well, and a file
+      // compiled twice defines every type in it twice.
+      SourceFiles = extras.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+      References = references.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+      Dependencies = dependencies,
       Width = options.Width ?? settings.Width ?? 80,
       Height = options.Height ?? settings.Height ?? 24,
       SettingsSource = settings.Source,
@@ -128,6 +167,11 @@ internal static class PreviewRunner
       if (preview.References.Count > 0)
       {
         Console.WriteLine($"{"references",-10}: {preview.References.Count} added to the defaults");
+      }
+
+      foreach (string output in preview.Dependencies)
+      {
+        Console.WriteLine($"{"project",-10}: {output}");
       }
 
       return RunPreview(preview);
@@ -165,7 +209,7 @@ internal static class PreviewRunner
 
     if (options.Interactive)
     {
-      return InteractiveSession.Run(displayName, source, build, preview.Warnings);
+      return InteractiveSession.Run(displayName, source, build, preview.Warnings, preview.Dependencies);
     }
 
     if (options.UiSnapshot)
@@ -235,10 +279,20 @@ internal static class PreviewRunner
       return 0;
     }
 
-    using var watch = new PollingFileWatch(source);
-    watch.Changed += _ => RenderOnce();
+    // The view, and the build output of every project it references: rebuilding the library is
+    // as much a change to what the view looks like as editing the view.
+    List<PollingFileWatch> watches = new[] { source }.Concat(preview.Dependencies)
+      .Select(path => new PollingFileWatch(path))
+      .ToList();
+    foreach (PollingFileWatch watch in watches)
+    {
+      watch.Changed += _ => RenderOnce();
+    }
 
-    Console.WriteLine($"watching {source}. Press Ctrl+C to stop.");
+    string also = preview.Dependencies.Count > 0
+      ? $" and {preview.Dependencies.Count} project output(s)"
+      : string.Empty;
+    Console.WriteLine($"watching {source}{also}. Press Ctrl+C to stop.");
     RenderOnce();
 
     // Ctrl+C ends the watch and returns, instead of killing a process that may be the user's app.
@@ -257,6 +311,10 @@ internal static class PreviewRunner
     finally
     {
       Console.CancelKeyPress -= onCancel;
+      foreach (PollingFileWatch watch in watches)
+      {
+        watch.Dispose();
+      }
     }
 
     return 0;

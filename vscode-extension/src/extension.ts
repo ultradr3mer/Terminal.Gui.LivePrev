@@ -36,6 +36,9 @@ interface Resolved {
     /** Assemblies to add to the tool's default reference set. */
     references: string[];
 
+    /** Projects whose existing build output the tool adds to the reference set. */
+    projects: string[];
+
     /** The size the view asked for, so `launch` can prefer it over the workspace-wide setting. */
     width?: number;
     height?: number;
@@ -59,6 +62,12 @@ interface ViewSettings {
 
     /** Assemblies to add to the tool's default reference set. */
     references: string[];
+
+    /**
+     * Projects whose build output is added to the reference set: a control library from the same
+     * solution. The tool asks MSBuild where each builds to; nothing builds them.
+     */
+    projects: string[];
 
     /** Where to find the tuipreview tool for this view. */
     cliPath?: string;
@@ -100,7 +109,7 @@ function logLine(message: string): void {
  * Surfaced in the status bar and the log so "command not found" is never a mystery: a
  * stale host runs old code while VS Code shows the new menu entries from package.json.
  */
-const BUILD = "2026-10-03.2";
+const BUILD = "2026-10-04.1";
 
 /** Shows which build is live, so a stale Extension Development Host is immediately visible. */
 let status: vscode.StatusBarItem | undefined;
@@ -328,6 +337,7 @@ async function initSidecar(view: string, sidecar: string, entries: [string, stri
         lines.map((l) => `${l}\n`).join("") +
         `  // "extra": ["Layout/Shared.cs"],\n` +
         `  // "reference": ["../lib/Controls.dll"],\n` +
+        `  // "project": ["../Controls/Controls.csproj"],\n` +
         `  // "clipath": "../tools/tuipreview.dll",\n` +
         `}\n`;
 
@@ -429,6 +439,17 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         }
     }
 
+    // Only that the project exists. Whether it has been built is the tool's question: it asks
+    // MSBuild where the output goes, and says so in the terminal if it is not there.
+    for (const project of settings.projects) {
+        if (!fs.existsSync(project)) {
+            throw new Error(
+                `${path.basename(view)} lists a project that does not exist: ${project}. ` +
+                `Check its "project" annotation or .tui.json.`
+            );
+        }
+    }
+
     const className = await resolveClassName(view, text, settings);
     const launcher = resolveLauncher(view, settings);
 
@@ -454,6 +475,7 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         (previewPath === view ? "" : ` preview=${previewPath}`) +
         (settings.extra.length > 0 ? ` extra=${settings.extra.join(",")}` : "") +
         (settings.references.length > 0 ? ` refs=${settings.references.join(",")}` : "") +
+        (settings.projects.length > 0 ? ` projects=${settings.projects.join(",")}` : "") +
         (settings.cliPath ? ` cliPath=${settings.cliPath}` : "")
     );
 
@@ -464,6 +486,7 @@ async function resolve(picked?: vscode.Uri): Promise<Resolved> {
         previewPath,
         extraFiles: settings.extra,
         references: settings.references,
+        projects: settings.projects,
         width: settings.width,
         height: settings.height,
         warnings: settings.warnings,
@@ -597,7 +620,7 @@ function findViewFile(root: string, depth = 4): string | undefined {
  * a preview that is otherwise fine, and the warning names the file so it can be found again.
  */
 function readViewSettings(view: string, text: string): ViewSettings {
-    const settings: ViewSettings = { extra: [], references: [], warnings: [], stated: {} };
+    const settings: ViewSettings = { extra: [], references: [], projects: [], warnings: [], stated: {} };
     const baseDir = path.dirname(view);
 
     // A sidecar is optional and its absence is not a problem, so a read failure is simply "no
@@ -721,6 +744,15 @@ function applyJson(
 
                 break;
 
+            case "project":
+                for (const entry of Array.isArray(value) ? value : [value]) {
+                    if (typeof entry === "string" && entry.trim().length > 0) {
+                        settings.projects.push(path.resolve(baseDir, entry.trim()));
+                    }
+                }
+
+                break;
+
             default:
                 settings.warnings.push(`${origin}: unknown key "${key}"; ignoring it.`);
                 break;
@@ -778,6 +810,11 @@ function applyAnnotation(
 
             if (lower === "reference") {
                 settings.references.push(path.resolve(baseDir, value));
+                continue;
+            }
+
+            if (lower === "project") {
+                settings.projects.push(path.resolve(baseDir, value));
                 continue;
             }
 
@@ -1182,6 +1219,13 @@ function commandLine(resolved: Resolved, extra: string[]): string {
             ? [
                 "--reference",
                 ...resolved.references.map((f) => quote(f)),
+            ]
+            : []),
+        // Evaluated by the tool, which turns each into its build output and package assemblies.
+        ...(resolved.projects.length > 0
+            ? [
+                "--project",
+                ...resolved.projects.map((f) => quote(f)),
             ]
             : []),
         ...extra,

@@ -22,6 +22,7 @@ internal sealed partial class ViewSettings
 {
   private readonly List<string> _extra = new();
   private readonly List<string> _references = new();
+  private readonly List<string> _projects = new();
   private readonly List<string> _warnings = new();
 
   /// <summary>
@@ -52,6 +53,13 @@ internal sealed partial class ViewSettings
   /// holding one, because both are what a third-party control library hands out.
   /// </summary>
   public IReadOnlyList<string> References => _references;
+
+  /// <summary>
+  /// Projects whose build output is added to the reference set, as written: a control library in
+  /// the same solution, which is what a <c>&lt;ProjectReference&gt;</c> in the app points at. The
+  /// tool asks MSBuild where each one builds to; it never builds them itself.
+  /// </summary>
+  public IReadOnlyList<string> Projects => _projects;
 
   /// <summary>
   /// A path to the <c>tuipreview</c> tool for this view, or null to let the caller find one.
@@ -86,27 +94,81 @@ internal sealed partial class ViewSettings
   /// </summary>
   public static ViewSettings Read(string viewFile)
   {
+    string text;
+    try
+    {
+      text = File.ReadAllText(viewFile);
+    }
+    catch (IOException ex)
+    {
+      var unreadable = Read(viewFile, string.Empty);
+      unreadable._warnings.Add(
+        $"could not read {Path.GetFileName(viewFile)} for annotations ({ex.Message}).");
+      return unreadable;
+    }
+
+    return Read(viewFile, text);
+  }
+
+  /// <summary>
+  /// Reads both sources for <paramref name="viewFile"/>, taking the annotations from
+  /// <paramref name="text"/> rather than from disk.
+  /// <para>
+  /// This is what an editor calls: the open buffer may hold an annotation that is not saved yet,
+  /// and that unsaved annotation is the one the user is looking at. The sidecar is still read from
+  /// disk, since nothing else could hold it.
+  /// </para>
+  /// </summary>
+  public static ViewSettings Read(string viewFile, string text)
+  {
     var settings = new ViewSettings
     {
       BaseDir = Path.GetDirectoryName(Path.GetFullPath(viewFile))!,
     };
 
-    // Named after the view: MyView.tui.cs -> MyView.tui.json. The .tui.cs suffix is dropped
-    // rather than replaced, so the pair reads as one artifact with two halves.
-    string name = Path.GetFileName(viewFile);
-    int suffix = name.LastIndexOf(".tui.cs", StringComparison.Ordinal);
-    if (suffix > 0)
+    if (SidecarPathFor(viewFile) is { } sidecar)
     {
-      string sidecar = Path.Combine(
-        Path.GetDirectoryName(Path.GetFullPath(viewFile))!,
-        name[..suffix] + ".tui.json");
       settings.ReadSidecar(sidecar);
     }
 
-    settings.ReadAnnotations(viewFile);
+    settings.ReadAnnotations(viewFile, text);
 
     return settings;
   }
+
+  /// <summary>
+  /// The sidecar that goes with a view, or null when the name does not end in <c>.tui.cs</c>.
+  /// <para>
+  /// Named after the view: MyView.tui.cs -> MyView.tui.json. The .tui.cs suffix is dropped
+  /// rather than replaced, so the pair reads as one artifact with two halves.
+  /// </para>
+  /// </summary>
+  public static string? SidecarPathFor(string viewFile)
+  {
+    // Case-insensitive, like the file system and like the editors' own test for a view: a view
+    // saved as Main.TUI.CS is still a view, and must still find Main.tui.json.
+    const string viewSuffix = ".tui.cs";
+    string name = Path.GetFileName(viewFile);
+    if (name.Length <= viewSuffix.Length || !name.EndsWith(viewSuffix, StringComparison.OrdinalIgnoreCase))
+    {
+      return null;
+    }
+
+    return Path.Combine(
+      Path.GetDirectoryName(Path.GetFullPath(viewFile))!,
+      name[..^viewSuffix.Length] + ".tui.json");
+  }
+
+  /// <summary>
+  /// Whether either source stated a valid value for the single-valued <paramref name="key"/>.
+  /// An editor's "init" uses this to write down only what the view does not already say.
+  /// </summary>
+  public bool States(string key) => _stated.ContainsKey(key);
+
+  /// <summary>
+  /// Whether <paramref name="text"/> already holds a <c>// @tuipreview</c> line, valid or not.
+  /// </summary>
+  public static bool HasAnnotation(string text) => Annotation().IsMatch(text);
 
   private void ReadSidecar(string file)
   {
@@ -164,7 +226,7 @@ internal sealed partial class ViewSettings
 
     if (root.TryGetProperty("extra", out JsonElement extra))
     {
-      foreach (string entry in ReadExtraList(extra, origin))
+      foreach (string entry in ReadExtraList(extra, "extra", origin))
       {
         Apply("extra", Resolve(baseDir, entry), origin, baseDir);
       }
@@ -175,16 +237,24 @@ internal sealed partial class ViewSettings
     // "relative to that view".
     if (root.TryGetProperty("reference", out JsonElement references))
     {
-      foreach (string entry in ReadExtraList(references, origin))
+      foreach (string entry in ReadExtraList(references, "reference", origin))
       {
         Apply("reference", Resolve(baseDir, entry), origin, baseDir);
+      }
+    }
+
+    if (root.TryGetProperty("project", out JsonElement projects))
+    {
+      foreach (string entry in ReadExtraList(projects, "project", origin))
+      {
+        Apply("project", Resolve(baseDir, entry), origin, baseDir);
       }
     }
 
     // Reported after the known keys are read, so a typo does not also suppress a value.
     foreach (JsonProperty property in root.EnumerateObject())
     {
-      if (property.Name is not ("class" or "width" or "height" or "extra" or "reference" or "clipath"))
+      if (property.Name is not ("class" or "width" or "height" or "extra" or "reference" or "project" or "clipath"))
       {
         _warnings.Add($"{origin}: unknown key \"{property.Name}\"; ignoring it.");
       }
@@ -195,7 +265,7 @@ internal sealed partial class ViewSettings
   /// The "extra" entries, accepting a bare string as well as an array because a single extra
   /// file is the common case and an array of one is noise.
   /// </summary>
-  private IEnumerable<string> ReadExtraList(JsonElement extra, string origin)
+  private IEnumerable<string> ReadExtraList(JsonElement extra, string key, string origin)
   {
     if (extra.ValueKind == JsonValueKind.Array)
     {
@@ -209,23 +279,12 @@ internal sealed partial class ViewSettings
       return [extra.GetString()!];
     }
 
-    _warnings.Add($"{origin}: \"extra\" must be a string or an array of strings; ignoring it.");
+    _warnings.Add($"{origin}: \"{key}\" must be a string or an array of strings; ignoring it.");
     return [];
   }
 
-  private void ReadAnnotations(string viewFile)
+  private void ReadAnnotations(string viewFile, string text)
   {
-    string text;
-    try
-    {
-      text = File.ReadAllText(viewFile);
-    }
-    catch (IOException ex)
-    {
-      _warnings.Add($"could not read {Path.GetFileName(viewFile)} for annotations ({ex.Message}).");
-      return;
-    }
-
     string origin = Path.GetFileName(viewFile);
     string baseDir = Path.GetDirectoryName(Path.GetFullPath(viewFile))!;
 
@@ -238,9 +297,10 @@ internal sealed partial class ViewSettings
           ? pair.Groups["quoted"].Value
           : pair.Groups["bare"].Value;
 
-        // Both name a file the view is written against, so both resolve against the view.
+        // All name a file the view is written against, so all resolve against the view.
         bool isFile = key.Equals("extra", StringComparison.OrdinalIgnoreCase)
-          || key.Equals("reference", StringComparison.OrdinalIgnoreCase);
+          || key.Equals("reference", StringComparison.OrdinalIgnoreCase)
+          || key.Equals("project", StringComparison.OrdinalIgnoreCase);
 
         Apply(key, isFile ? Resolve(baseDir, value) : value, origin, baseDir);
       }
@@ -304,6 +364,11 @@ internal sealed partial class ViewSettings
         // directory is kept as written: the caller expands it, because which file inside a
         // directory is the library is not a guess this parser should be making.
         _references.Add(value);
+        Source = "view settings";
+        break;
+
+      case "project":
+        _projects.Add(value);
         Source = "view settings";
         break;
 
@@ -373,6 +438,15 @@ internal sealed partial class ViewSettings
       return null;
     }
 
+    return InferClassNameFromText(text);
+  }
+
+  /// <summary>
+  /// <see cref="InferClassName"/> for source that is already in memory, such as an editor buffer
+  /// with unsaved changes.
+  /// </summary>
+  public static string? InferClassNameFromText(string text)
+  {
     // Comments are removed first, so a commented-out class cannot be picked up.
     string code = Regex.Replace(Regex.Replace(text, @"/\*[\s\S]*?\*/", " "), @"//[^\n]*", " ");
 

@@ -36,6 +36,12 @@ internal sealed record ResolvedPreview
   /// <summary>Assemblies added to the default reference set, as absolute paths.</summary>
   public required IReadOnlyList<string> References { get; init; }
 
+  /// <summary>
+  /// The build outputs of the projects the view references. Watched alongside the view, so that
+  /// rebuilding a library refreshes a running preview. Empty when the view names no projects.
+  /// </summary>
+  public IReadOnlyList<string> Dependencies { get; init; } = [];
+
   /// <summary>Render width in columns. Interactive mode fills the terminal and ignores this.</summary>
   public required int Width { get; init; }
 
