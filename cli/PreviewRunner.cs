@@ -36,7 +36,15 @@ internal static class PreviewRunner
 
     // Read before validation, because the view may be what supplies --class. Any warning here is
     // a bad annotation, which must not stop a preview that is otherwise fine.
-    var settings = ViewSettings.Read(options.ViewCs!);
+    //
+    // When --view is an editor's scratch copy, --display-name is the real file, and the settings
+    // belong to that: its relative paths are relative to the real view, and its sidecar sits next
+    // to the real view. The text is still the scratch copy's, since an unsaved annotation is the
+    // one that applies. Read against the scratch copy, "extra=Layout/Helper.cs" would point into
+    // the temp folder.
+    var settings = options.DisplayName is { Length: > 0 } realView
+      ? ViewSettings.Read(Path.GetFullPath(realView), File.ReadAllText(options.ViewCs!))
+      : ViewSettings.Read(options.ViewCs!);
     foreach (string warning in settings.Warnings)
     {
       Console.Error.WriteLine($"warning: {warning}");
@@ -132,7 +140,9 @@ internal static class PreviewRunner
       // relative path written in a view means "relative to that view". Command line values are
       // relative to wherever the user ran the tool from, which is the only sensible reading of a
       // path typed at a prompt. GetFullPath does the right thing in both cases.
-      SourceFiles = extras.Select(Path.GetFullPath).ToArray(),
+      // Distinct, because an editor passes the view's own extras explicitly as well, and a file
+      // compiled twice defines every type in it twice.
+      SourceFiles = extras.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
       References = references.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
       Dependencies = dependencies,
       Width = options.Width ?? settings.Width ?? 80,

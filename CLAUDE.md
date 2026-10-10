@@ -35,6 +35,8 @@ Full chain for `--class`: explicit flag → annotation → sidecar → `tuiLiveP
 
 Both sides implement this, deliberately: `cli/ViewSettings.cs` (with `InferClassName`) and `readViewSettings()` in `src/extension.ts`. The extension re-reads them so it can pass explicit flags and name a bad `extra` file itself, in a message that can say which setting asked for it. The Visual Studio extension compiles `cli/ViewSettings.cs` in directly (`Read(view, text)` takes the editor buffer), so a change to the grammar there reaches it for free; only the TypeScript copy has to be kept in step by hand.
 
+Because the extensions pass the settings explicitly *and* the tool reads them itself, the tool must tolerate both: it de-duplicates extras, references and projects, and when `--view` is a scratch copy it reads the settings against `--display-name` (the real view) with the scratch copy's text. Otherwise a relative `extra`/`reference`/`project` resolves into `%TEMP%`.
+
 ## The parts
 
 1. **`cli/` – the `tuipreview` tool** (`TuiPreview.Cli.csproj`, net10.0, Terminal.Gui `[2.5.0,2.6)`, Roslyn), packed as a dotnet tool.

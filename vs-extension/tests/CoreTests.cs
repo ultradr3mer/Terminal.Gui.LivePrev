@@ -445,6 +445,67 @@ public class LaunchScriptTests
             Height = 12,
         };
 
+        string output = RunScript(request);
+        Assert.Contains("SampleApp.MainView", output);
+        Assert.Contains(view, output);
+        Assert.DoesNotContain("error:", output);
+        Assert.DoesNotContain("cannot find the path", output);
+    }
+
+    /// <summary>
+    /// What the extension runs for an open editor: the scratch copy as --view, the real file as
+    /// --display-name, and the view's own extras passed explicitly as well. The annotation's
+    /// relative path must resolve against the real view rather than the scratch folder, and the
+    /// extra passed twice must be compiled once.
+    /// </summary>
+    [Fact]
+    public void A_scratch_copy_keeps_the_real_views_relative_paths()
+    {
+        string? root = RepoRoot();
+        string? tool = root is null ? null : ToolLocator.FindBuiltCli(root);
+        if (tool is null)
+        {
+            return;
+        }
+
+        using var dir = new TempDir();
+        string helper = Path.Combine(dir.Path, "real", "Layout", "Helper.cs");
+        Directory.CreateDirectory(Path.GetDirectoryName(helper)!);
+        File.WriteAllText(helper, "namespace App; public static class Helper { public const string Text = \"from helper\"; }");
+
+        string text = """
+            // @tuipreview class=App.Main extra=Layout/Helper.cs
+            using Terminal.Gui.Views;
+            namespace App;
+            public partial class Main : Window
+            {
+                private readonly Label _l = new() { X = 1, Y = 1, Text = Helper.Text };
+                private void InitializeComponent() { Add(_l); }
+            }
+            """;
+        string view = Path.Combine(dir.Path, "real", "Main.tui.cs");
+        File.WriteAllText(view, text);
+
+        var scratch = new ScratchFiles(Path.Combine(dir.Path, "scratch"));
+        var request = new PreviewRequest
+        {
+            Launcher = Launcher.For(tool),
+            View = view,
+            ClassName = "App.Main",
+            PreviewPath = scratch.Mirror(view, text),
+            ExtraFiles = [helper],
+            Width = 40,
+            Height = 6,
+        };
+
+        string output = RunScript(request);
+        Assert.Contains("from helper", output);
+        Assert.DoesNotContain("error", output);
+    }
+
+    /// <summary>Runs a render through a launch script, as the extension would, and returns its output.</summary>
+    private static string RunScript(PreviewRequest request)
+    {
         // Where the extension puts it: beside the scratch copies, not beside the view.
         using var scripts = new TempDir("tui scripts");
         string script = Path.Combine(scripts.Path, "launch.cmd");
@@ -466,10 +527,6 @@ public class LaunchScriptTests
         Task<string> stderr = process.StandardError.ReadToEndAsync();
         Assert.True(process.WaitForExit(TimeSpan.FromMinutes(2)), "the render did not finish");
 
-        string output = stdout.Result + stderr.Result;
-        Assert.Contains("SampleApp.MainView", output);
-        Assert.Contains(view, output);
-        Assert.DoesNotContain("error:", output);
-        Assert.DoesNotContain("cannot find the path", output);
+        return stdout.Result + stderr.Result;
     }
 }
