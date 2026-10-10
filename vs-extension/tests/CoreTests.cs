@@ -141,6 +141,7 @@ public class ArgumentTests
         var request = Request() with { View = @"C:\100% done\Main.tui.cs", PreviewPath = @"C:\100% done\Main.tui.cs" };
         string script = PreviewCommand.LaunchScript(request, PreviewMode.Render);
         Assert.Contains(@"""C:\100%% done\Main.tui.cs""", script);
+        Assert.Contains(@"cd /d ""C:\100%% done""", script);
     }
 }
 
@@ -299,6 +300,19 @@ public class PlannerTests
     }
 
     [Fact]
+    public void An_upper_case_view_still_finds_its_sidecar()
+    {
+        using var dir = new TempDir();
+        string sidecar = dir.Write("Main.tui.json", "{ \"class\": \"From.Sidecar\" }");
+        string view = dir.Write("Main.TUI.CS", "class Main {}");
+
+        Assert.True(PreviewPlanner.IsView(view));
+        Assert.Equal(sidecar, ViewSettings.SidecarPathFor(view));
+        Assert.Equal("From.Sidecar", ViewSettings.Read(view, "class Main {}").Class);
+        Assert.Null(ViewSettings.SidecarPathFor(Path.Combine(dir.Path, "Main.tui.cs.bak")));
+    }
+
+    [Fact]
     public void A_reference_may_be_a_directory()
     {
         using var dir = new TempDir();
@@ -416,7 +430,8 @@ public class LaunchScriptTests
             return;
         }
 
-        using var dir = new TempDir("tui A&B 100%");
+        // %TEMP% is a real variable, so an unescaped one would expand to somewhere else entirely.
+        using var dir = new TempDir("tui A&B 100% %TEMP%");
         string view = Path.Combine(dir.Path, "Main View.tui.cs");
         File.Copy(Path.Combine(root!, "samples", "SampleApp", "MainView.tui.cs"), view);
 
@@ -430,7 +445,9 @@ public class LaunchScriptTests
             Height = 12,
         };
 
-        string script = Path.Combine(dir.Path, "launch.cmd");
+        // Where the extension puts it: beside the scratch copies, not beside the view.
+        using var scripts = new TempDir("tui scripts");
+        string script = Path.Combine(scripts.Path, "launch.cmd");
         File.WriteAllText(script, PreviewCommand.LaunchScript(request, PreviewMode.Render));
 
         // The same command line the extension uses, minus the window.
@@ -453,5 +470,6 @@ public class LaunchScriptTests
         Assert.Contains("SampleApp.MainView", output);
         Assert.Contains(view, output);
         Assert.DoesNotContain("error:", output);
+        Assert.DoesNotContain("cannot find the path", output);
     }
 }

@@ -145,16 +145,18 @@ internal sealed partial class ViewSettings
   /// </summary>
   public static string? SidecarPathFor(string viewFile)
   {
+    // Case-insensitive, like the file system and like the editors' own test for a view: a view
+    // saved as Main.TUI.CS is still a view, and must still find Main.tui.json.
+    const string viewSuffix = ".tui.cs";
     string name = Path.GetFileName(viewFile);
-    int suffix = name.LastIndexOf(".tui.cs", StringComparison.Ordinal);
-    if (suffix <= 0)
+    if (name.Length <= viewSuffix.Length || !name.EndsWith(viewSuffix, StringComparison.OrdinalIgnoreCase))
     {
       return null;
     }
 
     return Path.Combine(
       Path.GetDirectoryName(Path.GetFullPath(viewFile))!,
-      name[..suffix] + ".tui.json");
+      name[..^viewSuffix.Length] + ".tui.json");
   }
 
   /// <summary>

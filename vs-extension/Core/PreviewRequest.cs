@@ -148,7 +148,9 @@ internal static class PreviewCommand
         script.AppendLine("chcp 65001 >nul");
         script.AppendLine($"title {EscapeBatchText($"{Label(mode)} - {Path.GetFileName(request.View)}")}");
         script.AppendLine($"set \"TUI_ANSI={(request.Ansi ? "1" : "0")}\"");
-        script.AppendLine($"cd /d {Quote(Path.GetDirectoryName(request.View)!)}");
+        // Escaped like the command line below: cmd expands %NAME% inside quotes too, so a folder
+        // literally called %TEMP% would otherwise send the preview somewhere else.
+        script.AppendLine(EscapePercent($"cd /d {Quote(Path.GetDirectoryName(request.View)!)}"));
         script.AppendLine(EscapePercent(CommandLine(request, mode)));
 
         // A render is one frame that has to stay on screen to be read. Interactive and watch only
@@ -165,6 +167,11 @@ internal static class PreviewCommand
     /// strips those quotes again whenever the path holds a character like <c>&amp;</c>, and the
     /// script then fails to start. With <c>/s</c> exactly the outer pair is stripped, so the path's
     /// own quotes survive. <c>/d</c> skips AutoRun commands, which have no place in a preview.
+    /// </para>
+    /// <para>
+    /// The script's own path must not hold a <c>%NAME%</c>: on a command line, unlike in a batch
+    /// file, there is no escape for it. That is why scripts are written next to the scratch copies,
+    /// in a folder the extension chooses, and never next to the view.
     /// </para>
     /// </summary>
     public static string ScriptArguments(string script) => $"/d /s /c \"\"{script}\"\"";

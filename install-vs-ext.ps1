@@ -91,10 +91,27 @@ if ($SkipTests) {
 }
 
 # --- 3. package ---
-# Days since 2026 and minutes since midnight: always increasing, and each part stays below the
-# 65535 a version component allows.
+# Days since 2026 and two-second steps since midnight, each below the 65535 a version component
+# allows. The clock alone can still repeat (two runs in one step, or a clock set back), and
+# VSIXInstaller refuses a version that is already installed, so the last version stamped is kept
+# and the new one is always made greater than it.
 $now = Get-Date
-$version = '0.1.{0}.{1}' -f ($now.Date - [datetime]'2026-01-01').Days, [int]$now.TimeOfDay.TotalMinutes
+$build = ($now.Date - [datetime]'2026-01-01').Days
+$revision = [int][math]::Floor($now.TimeOfDay.TotalSeconds / 2)
+
+$stampFile = Join-Path $extDir 'obj\last-vsix-version.txt'
+if (Test-Path $stampFile) {
+    $last = [version](Get-Content $stampFile -Raw).Trim()
+    if ([version]"0.1.$build.$revision" -le $last) {
+        $build = $last.Build
+        $revision = $last.Revision + 1
+        if ($revision -gt 65535) { $build++; $revision = 0 }
+    }
+}
+
+$version = "0.1.$build.$revision"
+New-Item -ItemType Directory -Force (Split-Path $stampFile) | Out-Null
+Set-Content $stampFile $version
 
 Write-Step "packaging the VSIX (version $version)"
 & dotnet build $extProj -c Release --nologo -v quiet "-p:Version=$version"
